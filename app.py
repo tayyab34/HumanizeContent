@@ -1,97 +1,103 @@
-
-import os, re, io
-from pathlib import Path
 import streamlit as st
+from extractors import extract_text
+from embeddings import create_faiss_index
+from plagiarism import check_plagiarism
+from humanizer import humanize_text
 
-try:
-    import fitz
-except:
-    fitz = None
+st.set_page_config(
+    page_title="Humanize RAG",
+    page_icon="📄",
+    layout="wide"
+)
 
-try:
-    from docx import Document
-except:
-    Document = None
+st.title("📄 AI Content Humanizer + Plagiarism Checker")
 
-try:
-    from pptx import Presentation
-except:
-    Presentation = None
+with st.sidebar:
+    st.header("Settings")
 
-try:
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.metrics.pairwise import cosine_similarity
-except:
-    TfidfVectorizer = None
-    cosine_similarity = None
+    similarity_threshold = st.slider(
+        "Similarity Threshold %",
+        0,
+        100,
+        70
+    )
 
-st.set_page_config(page_title="Document Integrity RAG", layout="wide")
-st.title("Document Integrity RAG (Streamlit)")
+uploaded_file = st.file_uploader(
+    "Upload PDF / DOCX / TXT",
+    type=["pdf", "docx", "txt"]
+)
 
-def read_pdf(data):
-    doc = fitz.open(stream=data, filetype="pdf")
-    return "\\n".join(page.get_text("text") for page in doc)
+if uploaded_file:
 
-def read_docx(data):
-    doc = Document(io.BytesIO(data))
-    return "\\n".join(p.text for p in doc.paragraphs)
+    with st.spinner("Extracting text..."):
+        document_text = extract_text(uploaded_file)
 
-def read_pptx(data):
-    prs = Presentation(io.BytesIO(data))
-    out = []
-    for slide in prs.slides:
-        for shape in slide.shapes:
-            if hasattr(shape, "text"):
-                out.append(shape.text)
-    return "\\n".join(out)
+    st.success("Document loaded")
 
-def extract(uploaded):
-    data = uploaded.read()
-    ext = Path(uploaded.name).suffix.lower()
+    st.subheader("Document Preview")
 
-    if ext == ".pdf":
-        return read_pdf(data)
-    if ext == ".docx":
-        return read_docx(data)
-    if ext == ".pptx":
-        return read_pptx(data)
+    st.text_area(
+        "Text",
+        document_text[:5000],
+        height=250
+    )
 
-    return data.decode("utf-8", errors="ignore")
+    col1, col2 = st.columns(2)
 
-def similarity(main_text, refs):
-    if not refs:
-        return []
+    with col1:
 
-    if TfidfVectorizer and cosine_similarity:
-        docs = [main_text] + [x[1] for x in refs]
-        vec = TfidfVectorizer(stop_words="english")
-        mat = vec.fit_transform(docs)
-        sims = cosine_similarity(mat[0:1], mat[1:]).ravel() * 100
-        return [(refs[i][0], round(float(sims[i]),2)) for i in range(len(refs))]
+        if st.button("Check Plagiarism"):
 
-    return []
+            with st.spinner("Searching web..."):
 
-main_doc = st.file_uploader("Upload Main Document", type=["pdf","docx","pptx","txt","md","csv"])
-ref_docs = st.file_uploader("Upload Reference Documents", accept_multiple_files=True,
-                            type=["pdf","docx","pptx","txt","md","csv"])
+                results = check_plagiarism(
+                    document_text,
+                    similarity_threshold
+                )
 
-if st.button("Analyze") and main_doc:
-    main_text = extract(main_doc)
+            st.subheader("Plagiarism Results")
 
-    refs = []
-    for f in ref_docs or []:
-        refs.append((f.name, extract(f)))
+            if not results:
+                st.success("No significant matches found.")
 
-    scores = similarity(main_text, refs)
+            else:
 
-    st.subheader("Analysis Report")
-    st.write(f"Characters: {len(main_text):,}")
-    st.write(f"Words: {len(main_text.split()):,}")
+                for item in results:
 
-    if scores:
-        st.subheader("Similarity")
-        for name, score in sorted(scores, key=lambda x: x[1], reverse=True):
-            st.write(f"{name}: {score:.2f}%")
+                    st.markdown("---")
 
-    st.subheader("Extracted Text")
-    st.text_area("", main_text[:12000], height=300)
+                    st.write(
+                        f"Similarity: {item['similarity']}%"
+                    )
+
+                    st.write(
+                        f"Source: {item['url']}"
+                    )
+
+                    st.write(
+                        item["snippet"]
+                    )
+
+    with col2:
+
+        if st.button("Humanize Content"):
+
+            with st.spinner("Humanizing content..."):
+
+                humanized = humanize_text(
+                    document_text
+                )
+
+            st.subheader("Humanized Output")
+
+            st.text_area(
+                "Result",
+                humanized,
+                height=400
+            )
+
+            st.download_button(
+                "Download",
+                humanized,
+                file_name="humanized.txt"
+            )
