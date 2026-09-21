@@ -3,27 +3,52 @@ import docx
 
 
 def extract_pdf(file):
-    text = ""
+    text_parts = []
 
-    pdf = pymupdf.open(stream=file.read(), filetype="pdf")
+    pdf = pymupdf.open(
+        stream=file.read(),
+        filetype="pdf"
+    )
 
-    for page in pdf:
-        text += page.get_text()
+    try:
+        for page in pdf:
+            page_text = page.get_text()
 
-    return text
+            if page_text:
+                text_parts.append(page_text)
+
+    finally:
+        pdf.close()
+
+    return "\n".join(text_parts).strip()
 
 
 def extract_docx(file):
     doc = docx.Document(file)
 
-    return "\n".join(
-        para.text
-        for para in doc.paragraphs
-    )
+    text_parts = []
+
+    for paragraph in doc.paragraphs:
+        text = paragraph.text.strip()
+
+        if text:
+            text_parts.append(text)
+
+    return "\n".join(text_parts).strip()
 
 
 def extract_txt(file):
-    return file.read().decode("utf-8")
+
+    data = file.read()
+
+    try:
+        return data.decode("utf-8").strip()
+
+    except UnicodeDecodeError:
+        return data.decode(
+            "utf-8",
+            errors="ignore"
+        ).strip()
 
 
 def extract_text(uploaded_file):
@@ -39,4 +64,6 @@ def extract_text(uploaded_file):
     if name.endswith(".txt"):
         return extract_txt(uploaded_file)
 
-    return ""
+    raise ValueError(
+        "Unsupported file type. Please upload PDF, DOCX, or TXT."
+    )
