@@ -8,7 +8,15 @@ st.set_page_config(
 
 st.title("📄 AI Content Humanizer + Plagiarism Checker")
 
-# Import after Streamlit starts so import errors are easier to identify
+st.write(
+    "Upload a PDF, DOCX, or TXT document to check "
+    "web-source similarity and rewrite the content."
+)
+
+# ---------------------------------------------------------
+# IMPORTS
+# ---------------------------------------------------------
+
 try:
     from extractors import extract_text
 except Exception as e:
@@ -31,7 +39,12 @@ except Exception as e:
     st.stop()
 
 
+# ---------------------------------------------------------
+# SIDEBAR
+# ---------------------------------------------------------
+
 with st.sidebar:
+
     st.header("⚙️ Settings")
 
     similarity_threshold = st.slider(
@@ -47,29 +60,40 @@ with st.sidebar:
     )
 
 
+# ---------------------------------------------------------
+# FILE UPLOAD
+# ---------------------------------------------------------
+
 uploaded_file = st.file_uploader(
     "Upload PDF / DOCX / TXT",
     type=["pdf", "docx", "txt"]
 )
 
 
+# ---------------------------------------------------------
+# PROCESS DOCUMENT
+# ---------------------------------------------------------
+
 if uploaded_file is not None:
 
-    # -------------------------
-    # EXTRACT TEXT
-    # -------------------------
-
+    # Extract text FIRST
     with st.spinner("Reading document..."):
 
         try:
             main_text = extract_text(uploaded_file)
 
         except Exception as e:
-            st.error("Could not extract text from this file.")
+
+            st.error(
+                "Could not extract text from this file."
+            )
+
             st.exception(e)
+
             st.stop()
 
 
+    # Check extracted text
     if not main_text or not main_text.strip():
 
         st.warning(
@@ -80,13 +104,13 @@ if uploaded_file is not None:
 
 
     st.success(
-        f"Document loaded: {uploaded_file.name}"
+        f"Document loaded successfully: {uploaded_file.name}"
     )
 
 
-    # -------------------------
-    # DOCUMENT INFORMATION
-    # -------------------------
+    # -----------------------------------------------------
+    # DOCUMENT PREVIEW
+    # -----------------------------------------------------
 
     st.subheader("📖 Document Preview")
 
@@ -96,6 +120,10 @@ if uploaded_file is not None:
         height=300
     )
 
+
+    # -----------------------------------------------------
+    # DOCUMENT STATS
+    # -----------------------------------------------------
 
     word_count = len(main_text.split())
     character_count = len(main_text)
@@ -117,7 +145,7 @@ if uploaded_file is not None:
 
     with col3:
         st.metric(
-            "Threshold",
+            "Similarity Threshold",
             f"{similarity_threshold}%"
         )
 
@@ -125,28 +153,25 @@ if uploaded_file is not None:
     st.divider()
 
 
-    # -------------------------
-    # TWO COLUMNS
-    # -------------------------
+    # -----------------------------------------------------
+    # MAIN COLUMNS
+    # -----------------------------------------------------
 
-    left, right = st.columns(2)
+    left_column, right_column = st.columns(2)
 
 
     # =====================================================
-    # PLAGIARISM
+    # PLAGIARISM CHECK
     # =====================================================
 
-    with left:
+    with left_column:
 
         st.subheader("🔎 Web Similarity Check")
 
-        check_button = st.button(
+        if st.button(
             "Check Plagiarism",
             use_container_width=True
-        )
-
-
-        if check_button:
+        ):
 
             with st.spinner(
                 "Searching web sources and comparing content..."
@@ -179,7 +204,8 @@ if uploaded_file is not None:
             else:
 
                 st.warning(
-                    f"{len(results)} potential match(es) found."
+                    f"{len(results)} potential web-source "
+                    f"match(es) found."
                 )
 
 
@@ -197,6 +223,7 @@ if uploaded_file is not None:
                         "similarity",
                         0
                     )
+
 
                     st.metric(
                         "Semantic Similarity",
@@ -255,21 +282,17 @@ if uploaded_file is not None:
 
 
     # =====================================================
-    # HUMANIZER
+    # HUMANIZE
     # =====================================================
 
-    with right:
+    with right_column:
 
         st.subheader("✍️ Humanize Content")
 
-
-        humanize_button = st.button(
+        if st.button(
             "Humanize Content",
             use_container_width=True
-        )
-
-
-        if humanize_button:
+        ):
 
             with st.spinner(
                 "Rewriting content..."
