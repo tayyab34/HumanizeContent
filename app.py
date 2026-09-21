@@ -1,8 +1,9 @@
 import streamlit as st
+
 from extractors import extract_text
-from embeddings import create_faiss_index
 from plagiarism import check_plagiarism
 from humanizer import humanize_text
+
 
 st.set_page_config(
     page_title="Humanize RAG",
@@ -11,93 +12,179 @@ st.set_page_config(
 )
 
 st.title("📄 AI Content Humanizer + Plagiarism Checker")
+st.caption("RAG-based document analysis with web-source similarity checking")
+
 
 with st.sidebar:
     st.header("Settings")
 
     similarity_threshold = st.slider(
-        "Similarity Threshold %",
-        0,
-        100,
-        70
+        "Similarity Threshold (%)",
+        min_value=0,
+        max_value=100,
+        value=70,
+        step=5
     )
+
+    max_sources = st.number_input(
+        "Maximum web sources",
+        min_value=1,
+        max_value=10,
+        value=5,
+        step=1
+    )
+
 
 uploaded_file = st.file_uploader(
     "Upload PDF / DOCX / TXT",
     type=["pdf", "docx", "txt"]
 )
 
-if uploaded_file:
 
+if uploaded_file is None:
+    st.info("Upload a document to begin.")
+    st.stop()
+
+
+try:
     with st.spinner("Extracting text..."):
         document_text = extract_text(uploaded_file)
 
-    st.success("Document loaded")
+except Exception as e:
+    st.error(f"Could not read the document: {e}")
+    st.stop()
 
-    st.subheader("Document Preview")
 
-    st.text_area(
-        "Text",
-        document_text[:5000],
-        height=250
-    )
+if not document_text or not document_text.strip():
+    st.error("No readable text was found in this document.")
+    st.stop()
 
-    col1, col2 = st.columns(2)
 
-    with col1:
+st.success(
+    f"Document loaded successfully — {len(document_text):,} characters"
+)
 
-        if st.button("Check Plagiarism"):
 
-            with st.spinner("Searching web..."):
+st.subheader("Document Preview")
 
+st.text_area(
+    "Extracted Text",
+    document_text[:10000],
+    height=300
+)
+
+
+col1, col2 = st.columns(2)
+
+
+with col1:
+
+    st.subheader("🔎 Plagiarism Checker")
+
+    if st.button(
+        "Check Plagiarism",
+        type="primary",
+        use_container_width=True
+    ):
+
+        with st.spinner("Searching web sources and calculating similarity..."):
+
+            try:
                 results = check_plagiarism(
                     document_text,
-                    similarity_threshold
+                    similarity_threshold,
+                    max_sources
                 )
 
-            st.subheader("Plagiarism Results")
+            except Exception as e:
+                st.error(f"Plagiarism check failed: {e}")
+                results = []
 
-            if not results:
-                st.success("No significant matches found.")
 
-            else:
+        if not results:
+            st.success(
+                "No significant matching web sources were found."
+            )
 
-                for item in results:
+        else:
 
-                    st.markdown("---")
+            st.warning(
+                f"{len(results)} potentially similar source(s) found."
+            )
 
-                    st.write(
-                        f"Similarity: {item['similarity']}%"
+            for index, item in enumerate(results, start=1):
+
+                st.markdown("---")
+
+                st.markdown(
+                    f"### Source {index}"
+                )
+
+                similarity = item.get(
+                    "similarity",
+                    0
+                )
+
+                st.metric(
+                    "Similarity",
+                    f"{similarity}%"
+                )
+
+                url = item.get(
+                    "url",
+                    ""
+                )
+
+                if url:
+                    st.markdown(
+                        f"**Source:** [{url}]({url})"
                     )
 
-                    st.write(
-                        f"Source: {item['url']}"
-                    )
+                snippet = item.get(
+                    "snippet",
+                    ""
+                )
 
-                    st.write(
-                        item["snippet"]
-                    )
+                if snippet:
+                    st.write(snippet)
 
-    with col2:
 
-        if st.button("Humanize Content"):
+with col2:
 
-            with st.spinner("Humanizing content..."):
+    st.subheader("✍️ Humanize Content")
 
+    if st.button(
+        "Humanize Content",
+        type="primary",
+        use_container_width=True
+    ):
+
+        with st.spinner("Humanizing content..."):
+
+            try:
                 humanized = humanize_text(
                     document_text
                 )
 
-            st.subheader("Humanized Output")
+            except Exception as e:
+                st.error(f"Humanization failed: {e}")
+                humanized = ""
+
+
+        if humanized:
+
+            st.success("Content processed successfully.")
 
             st.text_area(
-                "Result",
+                "Humanized Output",
                 humanized,
-                height=400
+                height=500
             )
 
             st.download_button(
-                "Download",
-                humanized,
-                file_name="humanized.txt"
+                "⬇️ Download Humanized TXT",
+                data=humanized,
+                file_name="humanized.txt",
+                mime="text/plain",
+                use_container_width=True
             )
