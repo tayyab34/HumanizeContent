@@ -1,38 +1,97 @@
 
-import io, hashlib
+import os, re, io
 from pathlib import Path
 import streamlit as st
+
+try:
+    import fitz
+except:
+    fitz = None
+
+try:
+    from docx import Document
+except:
+    Document = None
+
+try:
+    from pptx import Presentation
+except:
+    Presentation = None
+
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+except:
+    TfidfVectorizer = None
+    cosine_similarity = None
 
 st.set_page_config(page_title="Document Integrity RAG", layout="wide")
 st.title("Document Integrity RAG (Streamlit)")
 
-def read_text(uploaded_file):
-    try:
-        return uploaded_file.read().decode("utf-8", errors="ignore")
-    except:
-        return ""
+def read_pdf(data):
+    doc = fitz.open(stream=data, filetype="pdf")
+    return "\\n".join(page.get_text("text") for page in doc)
 
-def similarity(a, b):
-    wa = set(a.lower().split())
-    wb = set(b.lower().split())
-    if not wa or not wb:
-        return 0.0
-    return round(len(wa & wb) / len(wa | wb) * 100, 2)
+def read_docx(data):
+    doc = Document(io.BytesIO(data))
+    return "\\n".join(p.text for p in doc.paragraphs)
 
-doc1 = st.file_uploader("Upload Document", type=["txt","md"])
-doc2 = st.file_uploader("Upload Reference Document", type=["txt","md"])
+def read_pptx(data):
+    prs = Presentation(io.BytesIO(data))
+    out = []
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if hasattr(shape, "text"):
+                out.append(shape.text)
+    return "\\n".join(out)
 
-if doc1 and doc2:
-    t1 = read_text(doc1)
-    t2 = read_text(doc2)
+def extract(uploaded):
+    data = uploaded.read()
+    ext = Path(uploaded.name).suffix.lower()
 
-    score = similarity(t1, t2)
+    if ext == ".pdf":
+        return read_pdf(data)
+    if ext == ".docx":
+        return read_docx(data)
+    if ext == ".pptx":
+        return read_pptx(data)
 
-    st.metric("Similarity %", score)
+    return data.decode("utf-8", errors="ignore")
 
-    st.subheader("Document Hash")
-    st.code(hashlib.sha256(t1.encode()).hexdigest())
+def similarity(main_text, refs):
+    if not refs:
+        return []
 
-    st.subheader("Document Preview")
-    st.text_area("Document", t1[:5000], height=250)
-    st.text_area("Reference", t2[:5000], height=250)
+    if TfidfVectorizer and cosine_similarity:
+        docs = [main_text] + [x[1] for x in refs]
+        vec = TfidfVectorizer(stop_words="english")
+        mat = vec.fit_transform(docs)
+        sims = cosine_similarity(mat[0:1], mat[1:]).ravel() * 100
+        return [(refs[i][0], round(float(sims[i]),2)) for i in range(len(refs))]
+
+    return []
+
+main_doc = st.file_uploader("Upload Main Document", type=["pdf","docx","pptx","txt","md","csv"])
+ref_docs = st.file_uploader("Upload Reference Documents", accept_multiple_files=True,
+                            type=["pdf","docx","pptx","txt","md","csv"])
+
+if st.button("Analyze") and main_doc:
+    main_text = extract(main_doc)
+
+    refs = []
+    for f in ref_docs or []:
+        refs.append((f.name, extract(f)))
+
+    scores = similarity(main_text, refs)
+
+    st.subheader("Analysis Report")
+    st.write(f"Characters: {len(main_text):,}")
+    st.write(f"Words: {len(main_text.split()):,}")
+
+    if scores:
+        st.subheader("Similarity")
+        for name, score in sorted(scores, key=lambda x: x[1], reverse=True):
+            st.write(f"{name}: {score:.2f}%")
+
+    st.subheader("Extracted Text")
+    st.text_area("", main_text[:12000], height=300)
