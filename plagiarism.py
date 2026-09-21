@@ -1,66 +1,208 @@
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+from typing import List, Dict
 
-from web_search import search_web
+from embeddings import (
+    split_into_chunks,
+    create_embeddings,
+    create_faiss_index,
+    search_faiss
+)
 
-
-def split_text(text, chunk_size=500):
-    words = text.split()
-
-    chunks = []
-
-    for i in range(0, len(words), chunk_size):
-        chunks.append(
-            " ".join(words[i:i + chunk_size])
-        )
-
-    return chunks
+from web_search import (
+    build_search_queries,
+    search_multiple
+)
 
 
-def similarity_score(a, b):
-    vectorizer = TfidfVectorizer()
+def clean_similarity(score: float) -> float:
+    """
+    Convert cosine similarity into a percentage.
 
-    vectors = vectorizer.fit_transform([a, b])
+    Small negative values are treated as zero.
+    """
 
-    score = cosine_similarity(
-        vectors[0:1],
-        vectors[1:2]
-    )[0][0]
+    score = max(0.0, min(1.0, score))
 
     return round(score * 100, 2)
 
 
-def check_plagiarism(document_text, similarity_threshold=70):
+def check_plagiarism(
+    document_text: str,
+    similarity_threshold: float = 70,
+    max_document_chunks: int = 12,
+    max_search_queries: int = 5,
+    results_per_query: int = 5,
+    top_k: int = 3
+) -> List[Dict]:
+    """
+    Search the web and identify semantically similar passages.
 
-    chunks = split_text(document_text)
+    Returns results in the format expected by app.py:
 
-    results = []
+    {
+        "similarity": 82.4,
+        "url": "...",
+        "snippet": "..."
+    }
+    """
 
-    for chunk in chunks[:10]:
+    if not document_text:
+        return []
 
-        query = " ".join(chunk.split()[:20])
+    # -----------------------------------------
+    # 1. Split uploaded document
+    # -----------------------------------------
 
-        web_results = search_web(query)
+    document_chunks = split_into_chunks(
+        document_text,
+        chunk_size=700,
+        overlap=100
+    )
 
-        for item in web_results:
+    if not document_chunks:
+        return []
 
-            score = similarity_score(
-                chunk,
-                item["snippet"]
+    # Limit workload
+    document_chunks = document_chunks[
+        :max_document_chunks
+    ]
+
+    # -----------------------------------------
+    # 2. Build search queries
+    # -----------------------------------------
+
+    queries = build_search_queries(
+        document_text,
+        max_queries=max_search_queries
+    )
+
+    if not queries:
+        return []
+
+    # -----------------------------------------
+    # 3. Search Internet
+    # -----------------------------------------
+
+    web_results = search_multiple(
+        queries,
+        results_per_query=results_per_query
+    )
+
+    if not web_results:
+        return []
+
+    # -----------------------------------------
+    # 4. Prepare web snippets
+    # -----------------------------------------
+
+    web_texts = []
+
+    for result in web_results:
+
+        text = " ".join([
+            result.get("title", ""),
+            result.get("snippet", "")
+        ]).strip()
+
+        if text:
+            web_texts.append(text)
+
+    if not web_texts:
+        return []
+
+    # -----------------------------------------
+    # 5. Create FAISS RAG index
+    # -----------------------------------------
+
+    index, indexed_texts = create_faiss_index(
+        web_texts
+    )
+
+    # -----------------------------------------
+    # 6. Compare document chunks
+    # -----------------------------------------
+
+    matches = []
+
+    for chunk in document_chunks:
+
+        retrieved = search_faiss(
+            index,
+            chunk,
+            indexed_texts,
+            top_k=top_k
+        )
+
+        for match in retrieved:
+
+            similarity = clean_similarity(
+                match["score"]
             )
 
-            if score >= similarity_threshold:
+            if similarity < similarity_threshold:
+                continue
 
-                results.append({
-                    "similarity": score,
-                    "url": item["url"],
-                    "snippet": item["snippet"],
-                    "matched_text": chunk[:500]
-                })
+            matched_text = match["text"]
 
-    results.sort(
+            # Find original web result
+            source = None
+
+            for result in web_results:
+
+                candidate = " ".join([
+                    result.get("title", ""),
+                    result.get("snippet", "")
+                ]).strip()
+
+                if candidate == matched_text:
+                    source = result
+                    break
+
+            if not source:
+                continue
+
+            matches.append({
+                "similarity": similarity,
+                "url": source.get("url", ""),
+                "snippet": source.get(
+                    "snippet",
+                    matched_text
+                ),
+                "matched_text": chunk
+            })
+
+    # -----------------------------------------
+    # 7. Remove duplicate URLs
+    # Keep strongest match
+    # -----------------------------------------
+
+    best_by_url = {}
+
+    for match in matches:
+
+        url = match["url"]
+
+        if url not in best_by_url:
+
+            best_by_url[url] = match
+
+        elif (
+            match["similarity"]
+            > best_by_url[url]["similarity"]
+        ):
+
+            best_by_url[url] = match
+
+    final_results = list(
+        best_by_url.values()
+    )
+
+    # -----------------------------------------
+    # 8. Sort highest similarity first
+    # -----------------------------------------
+
+    final_results.sort(
         key=lambda x: x["similarity"],
         reverse=True
     )
 
-    return results
+    return final_results
