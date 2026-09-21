@@ -1,158 +1,85 @@
-import re
-from typing import List, Tuple
-
 import faiss
 import numpy as np
-from sentence_transformers import SentenceTransformer
+
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-
-_model = None
-
-
-def get_embedding_model():
-    """
-    Load the embedding model once and reuse it.
-    """
-    global _model
-
-    if _model is None:
-        _model = SentenceTransformer(MODEL_NAME)
-
-    return _model
-
-
-def split_into_chunks(
-    text: str,
-    chunk_size: int = 700,
-    overlap: int = 100
-) -> List[str]:
-    """
-    Split text into reasonably sized chunks.
-
-    The chunks are sentence-aware where possible.
-    """
-
-    if not text:
-        return []
-
-    text = re.sub(r"\s+", " ", text).strip()
-
-    sentences = re.split(
-        r"(?<=[.!?])\s+",
-        text
-    )
-
-    chunks = []
-    current = ""
-
-    for sentence in sentences:
-
-        sentence = sentence.strip()
-
-        if not sentence:
-            continue
-
-        if len(current) + len(sentence) <= chunk_size:
-
-            if current:
-                current += " " + sentence
-            else:
-                current = sentence
-
-        else:
-
-            if current:
-                chunks.append(current)
-
-            # Character overlap
-            if overlap > 0 and current:
-                overlap_text = current[-overlap:]
-            else:
-                overlap_text = ""
-
-            current = (
-                overlap_text + " " + sentence
-            ).strip()
-
-    if current:
-        chunks.append(current)
-
-    return chunks
-
-
-def create_embeddings(
-    texts: List[str]
-) -> np.ndarray:
-    """
-    Convert text chunks into normalized embeddings.
-    """
+def create_faiss_index(texts):
 
     if not texts:
-        return np.empty((0, 384), dtype="float32")
+        return None, None
 
-    model = get_embedding_model()
+    cleaned_texts = [
+        text.strip()
+        for text in texts
+        if text and text.strip()
+    ]
 
-    embeddings = model.encode(
-        texts,
-        convert_to_numpy=True,
-        normalize_embeddings=True,
-        show_progress_bar=False
+    if not cleaned_texts:
+        return None, None
+
+    vectorizer = TfidfVectorizer(
+        stop_words="english",
+        ngram_range=(1, 2),
+        max_features=10000
     )
 
-    return embeddings.astype("float32")
+    matrix = vectorizer.fit_transform(
+        cleaned_texts
+    )
+
+    vectors = matrix.astype(
+        np.float32
+    ).toarray()
+
+    index = faiss.IndexFlatIP(
+        vectors.shape[1]
+    )
+
+    faiss.normalize_L2(vectors)
+
+    index.add(vectors)
+
+    return index, vectorizer
 
 
-def create_faiss_index(
-    texts: List[str]
-) -> Tuple[faiss.Index, List[str]]:
-    """
-    Create a FAISS cosine-similarity index.
-
-    Because embeddings are normalized, inner product
-    is equivalent to cosine similarity.
-    """
-
-    if not texts:
-        raise ValueError(
-            "Cannot create FAISS index from empty text."
-        )
-
-    embeddings = create_embeddings(texts)
-
-    dimension = embeddings.shape[1]
-
-    index = faiss.IndexFlatIP(dimension)
-
-    index.add(embeddings)
-
-    return index, texts
-
-
-def search_faiss(
-    index: faiss.Index,
-    query: str,
-    texts: List[str],
-    top_k: int = 5
+def search_similar(
+    query,
+    texts,
+    index,
+    vectorizer,
+    top_k=5
 ):
-    """
-    Search the FAISS index for semantically similar text.
-    """
 
-    if index is None or index.ntotal == 0:
+    if (
+        not query
+        or not texts
+        or index is None
+        or vectorizer is None
+    ):
         return []
 
-    query_embedding = create_embeddings([query])
+    query_vector = vectorizer.transform(
+        [query]
+    ).astype(
+        np.float32
+    ).toarray()
+
+    faiss.normalize_L2(
+        query_vector
+    )
 
     scores, indices = index.search(
-        query_embedding,
+        query_vector,
         min(top_k, index.ntotal)
     )
 
     results = []
 
-    for score, idx in zip(scores[0], indices[0]):
+    for score, idx in zip(
+        scores[0],
+        indices[0]
+    ):
 
         if idx < 0:
             continue
