@@ -1,334 +1,183 @@
-```python
 import streamlit as st
 
-from extractors import extract_text
-from plagiarism import check_plagiarism
-from humanizer import humanize_text
-
-
-# ==========================================
-# PAGE CONFIG
-# ==========================================
-
 st.set_page_config(
-    page_title="Humanize RAG",
+    page_title="AI Humanizer + Plagiarism Checker",
     page_icon="📄",
     layout="wide"
 )
 
+st.title("📄 AI Humanizer + Plagiarism Checker")
 
-# ==========================================
-# HEADER
-# ==========================================
-
-st.title("📄 AI Content Humanizer + Plagiarism Checker")
-
-st.write(
-    "Upload a PDF, DOCX, or TXT document to check "
-    "web-source similarity and rewrite the content."
-)
+st.write("Upload a PDF, DOCX, or TXT file.")
 
 
-# ==========================================
-# SIDEBAR
-# ==========================================
-
-with st.sidebar:
-
-    st.header("⚙️ Settings")
-
-    similarity_threshold = st.slider(
-        "Similarity Threshold %",
-        min_value=0,
-        max_value=100,
-        value=70,
-        step=5
-    )
-
-    st.caption(
-        "Higher values show only stronger semantic matches."
-    )
-
-
-# ==========================================
+# --------------------------------------------------
 # FILE UPLOAD
-# ==========================================
+# --------------------------------------------------
 
 uploaded_file = st.file_uploader(
-    "Upload PDF / DOCX / TXT",
-    type=["pdf", "docx", "txt"]
+    "Upload Document",
+    type=["txt", "pdf", "docx"]
 )
 
 
-# ==========================================
-# PROCESS FILE
-# ==========================================
+# --------------------------------------------------
+# MAIN TEXT
+# --------------------------------------------------
 
-if uploaded_file:
+main_text = ""
 
-    # --------------------------------------
-    # Extract text
-    # --------------------------------------
 
-    with st.spinner("Extracting document text..."):
+if uploaded_file is not None:
 
-        try:
+    try:
 
-            main_text = extract_text(
-                uploaded_file
+        file_name = uploaded_file.name.lower()
+
+        # TXT
+        if file_name.endswith(".txt"):
+
+            main_text = uploaded_file.getvalue().decode(
+                "utf-8",
+                errors="ignore"
             )
 
-        except Exception as e:
 
-            st.error(
-                f"Could not read the file: {e}"
+        # PDF
+        elif file_name.endswith(".pdf"):
+
+            import pymupdf
+
+            pdf_bytes = uploaded_file.getvalue()
+
+            pdf = pymupdf.open(
+                stream=pdf_bytes,
+                filetype="pdf"
             )
 
-            st.stop()
+            pages = []
+
+            for page in pdf:
+
+                text = page.get_text()
+
+                if text:
+                    pages.append(text)
+
+            pdf.close()
+
+            main_text = "\n\n".join(pages)
 
 
-    # --------------------------------------
-    # Empty document check
-    # --------------------------------------
+        # DOCX
+        elif file_name.endswith(".docx"):
 
-    if not main_text:
+            from docx import Document
+            from io import BytesIO
 
-        st.warning(
-            "No readable text was found in this document."
-        )
+            document = Document(
+                BytesIO(uploaded_file.getvalue())
+            )
 
-        st.stop()
+            paragraphs = []
 
+            for paragraph in document.paragraphs:
+
+                text = paragraph.text.strip()
+
+                if text:
+                    paragraphs.append(text)
+
+            main_text = "\n\n".join(paragraphs)
+
+
+    except Exception as e:
+
+        st.error("Error reading the uploaded file.")
+
+        st.exception(e)
+
+        main_text = ""
+
+
+# --------------------------------------------------
+# DOCUMENT PREVIEW
+# --------------------------------------------------
+
+if main_text:
 
     st.success(
         f"Document loaded successfully: {uploaded_file.name}"
     )
 
-
-    # ======================================
-    # DOCUMENT PREVIEW
-    # ======================================
-
     st.subheader("📖 Document Preview")
 
     st.text_area(
-        "Extracted document text",
+        "Document Preview",
         value=main_text[:12000],
         height=300
     )
 
 
-    # ======================================
+    # --------------------------------------------------
     # STATISTICS
-    # ======================================
+    # --------------------------------------------------
 
-    word_count = len(
-        main_text.split()
-    )
+    word_count = len(main_text.split())
+    character_count = len(main_text)
 
-    character_count = len(
-        main_text
-    )
-
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
 
     with col1:
+
         st.metric(
             "Words",
-            f"{word_count:,}"
+            word_count
         )
 
     with col2:
+
         st.metric(
             "Characters",
-            f"{character_count:,}"
-        )
-
-    with col3:
-        st.metric(
-            "Similarity Threshold",
-            f"{similarity_threshold}%"
+            character_count
         )
 
 
     st.divider()
 
 
-    # ======================================
-    # TWO MAIN ACTIONS
-    # ======================================
+    # --------------------------------------------------
+    # ANALYZE
+    # --------------------------------------------------
 
-    col1, col2 = st.columns(2)
+    if st.button(
+        "Analyze Document",
+        use_container_width=True
+    ):
 
+        st.success(
+            "Document analyzed successfully."
+        )
 
-    # ======================================
-    # PLAGIARISM CHECK
-    # ======================================
+        st.subheader("Extracted Text")
 
-    with col1:
-
-        st.subheader("🔎 Plagiarism / Similarity")
-
-        if st.button(
-            "Check Plagiarism",
-            use_container_width=True
-        ):
-
-            with st.spinner(
-                "Searching web sources and comparing content..."
-            ):
-
-                try:
-
-                    results = check_plagiarism(
-                        main_text,
-                        similarity_threshold
-                    )
-
-                except Exception as e:
-
-                    st.error(
-                        f"Plagiarism check failed: {e}"
-                    )
-
-                    results = None
+        st.text_area(
+            "Extracted Text",
+            value=main_text,
+            height=400
+        )
 
 
-            if results is None:
+else:
 
-                st.stop()
+    if uploaded_file is not None:
 
+        st.warning(
+            "No readable text was found in this document."
+        )
 
-            if not results:
+    else:
 
-                st.success(
-                    "No significant web-source matches were found."
-                )
-
-            else:
-
-                st.warning(
-                    f"{len(results)} potential web-source "
-                    "match(es) found."
-                )
-
-
-                for index, item in enumerate(
-                    results,
-                    start=1
-                ):
-
-                    st.markdown(
-                        f"### Match {index}"
-                    )
-
-                    similarity = item.get(
-                        "similarity",
-                        0
-                    )
-
-                    st.metric(
-                        "Semantic Similarity",
-                        f"{similarity}%"
-                    )
-
-                    url = item.get(
-                        "url",
-                        ""
-                    )
-
-                    if url:
-
-                        st.markdown(
-                            f"**Source:** [{url}]({url})"
-                        )
-
-
-                    snippet = item.get(
-                        "snippet",
-                        ""
-                    )
-
-                    if snippet:
-
-                        st.write(
-                            "**Web Source:**"
-                        )
-
-                        st.info(
-                            snippet
-                        )
-
-
-                    matched_text = item.get(
-                        "matched_text",
-                        ""
-                    )
-
-                    if matched_text:
-
-                        st.write(
-                            "**Matching Document Text:**"
-                        )
-
-                        st.warning(
-                            matched_text
-                        )
-
-                    st.divider()
-
-
-    # ======================================
-    # HUMANIZER
-    # ======================================
-
-    with col2:
-
-        st.subheader("✍️ Humanize Content")
-
-        if st.button(
-            "Humanize Content",
-            use_container_width=True
-        ):
-
-            with st.spinner(
-                "Rewriting content..."
-            ):
-
-                try:
-
-                    humanized = humanize_text(
-                        main_text
-                    )
-
-                except Exception as e:
-
-                    st.error(
-                        f"Humanization failed: {e}"
-                    )
-
-                    humanized = None
-
-
-            if humanized:
-
-                st.success(
-                    "Content rewritten successfully."
-                )
-
-
-                st.text_area(
-                    "Humanized Output",
-                    value=humanized,
-                    height=400
-                )
-
-
-                st.download_button(
-                    "⬇️ Download Humanized TXT",
-                    data=humanized,
-                    file_name="humanized.txt",
-                    mime="text/plain",
-                    use_container_width=True
-                )
-```
+        st.info(
+            "Please upload a PDF, DOCX, or TXT file to begin."
+        )
