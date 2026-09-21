@@ -1,0 +1,9 @@
+
+# Document Integrity RAG - Streamlit
+
+Run locally:
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
