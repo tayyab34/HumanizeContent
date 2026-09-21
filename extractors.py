@@ -1,4 +1,4 @@
-import fitz
+import pymupdf
 import docx
 
 
