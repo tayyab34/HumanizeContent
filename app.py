@@ -1,14 +1,4 @@
-```python
 import streamlit as st
-
-from extractors import extract_text
-from plagiarism import check_plagiarism
-from humanizer import humanize_text
-
-
-# ==========================================
-# PAGE CONFIG
-# ==========================================
 
 st.set_page_config(
     page_title="Humanize RAG",
@@ -16,25 +6,32 @@ st.set_page_config(
     layout="wide"
 )
 
-
-# ==========================================
-# HEADER
-# ==========================================
-
 st.title("📄 AI Content Humanizer + Plagiarism Checker")
 
-st.write(
-    "Upload a PDF, DOCX, or TXT document to check "
-    "web-source similarity and rewrite the content."
-)
+# Import after Streamlit starts so import errors are easier to identify
+try:
+    from extractors import extract_text
+except Exception as e:
+    st.error("Could not load extractors.py")
+    st.exception(e)
+    st.stop()
 
+try:
+    from plagiarism import check_plagiarism
+except Exception as e:
+    st.error("Could not load plagiarism.py")
+    st.exception(e)
+    st.stop()
 
-# ==========================================
-# SIDEBAR
-# ==========================================
+try:
+    from humanizer import humanize_text
+except Exception as e:
+    st.error("Could not load humanizer.py")
+    st.exception(e)
+    st.stop()
+
 
 with st.sidebar:
-
     st.header("⚙️ Settings")
 
     similarity_threshold = st.slider(
@@ -46,13 +43,9 @@ with st.sidebar:
     )
 
     st.caption(
-        "Higher values show only stronger semantic matches."
+        "Higher values show stronger semantic matches."
     )
 
-
-# ==========================================
-# FILE UPLOAD
-# ==========================================
 
 uploaded_file = st.file_uploader(
     "Upload PDF / DOCX / TXT",
@@ -60,54 +53,40 @@ uploaded_file = st.file_uploader(
 )
 
 
-# ==========================================
-# PROCESS FILE
-# ==========================================
+if uploaded_file is not None:
 
-if uploaded_file:
+    # -------------------------
+    # EXTRACT TEXT
+    # -------------------------
 
-    # --------------------------------------
-    # Extract text
-    # --------------------------------------
-
-    with st.spinner("Extracting document text..."):
+    with st.spinner("Reading document..."):
 
         try:
-
-            main_text = extract_text(
-                uploaded_file
-            )
+            main_text = extract_text(uploaded_file)
 
         except Exception as e:
-
-            st.error(
-                f"Could not read the file: {e}"
-            )
-
+            st.error("Could not extract text from this file.")
+            st.exception(e)
             st.stop()
 
 
-    # --------------------------------------
-    # Empty document check
-    # --------------------------------------
-
-    if not main_text:
+    if not main_text or not main_text.strip():
 
         st.warning(
-            "No readable text was found in this document."
+            "No readable text was found in the uploaded document."
         )
 
         st.stop()
 
 
     st.success(
-        f"Document loaded successfully: {uploaded_file.name}"
+        f"Document loaded: {uploaded_file.name}"
     )
 
 
-    # ======================================
-    # DOCUMENT PREVIEW
-    # ======================================
+    # -------------------------
+    # DOCUMENT INFORMATION
+    # -------------------------
 
     st.subheader("📖 Document Preview")
 
@@ -118,17 +97,9 @@ if uploaded_file:
     )
 
 
-    # ======================================
-    # STATISTICS
-    # ======================================
+    word_count = len(main_text.split())
+    character_count = len(main_text)
 
-    word_count = len(
-        main_text.split()
-    )
-
-    character_count = len(
-        main_text
-    )
 
     col1, col2, col3 = st.columns(3)
 
@@ -146,7 +117,7 @@ if uploaded_file:
 
     with col3:
         st.metric(
-            "Similarity Threshold",
+            "Threshold",
             f"{similarity_threshold}%"
         )
 
@@ -154,25 +125,28 @@ if uploaded_file:
     st.divider()
 
 
-    # ======================================
-    # TWO MAIN ACTIONS
-    # ======================================
+    # -------------------------
+    # TWO COLUMNS
+    # -------------------------
 
-    col1, col2 = st.columns(2)
+    left, right = st.columns(2)
 
 
-    # ======================================
-    # PLAGIARISM CHECK
-    # ======================================
+    # =====================================================
+    # PLAGIARISM
+    # =====================================================
 
-    with col1:
+    with left:
 
-        st.subheader("🔎 Plagiarism / Similarity")
+        st.subheader("🔎 Web Similarity Check")
 
-        if st.button(
+        check_button = st.button(
             "Check Plagiarism",
             use_container_width=True
-        ):
+        )
+
+
+        if check_button:
 
             with st.spinner(
                 "Searching web sources and comparing content..."
@@ -181,22 +155,19 @@ if uploaded_file:
                 try:
 
                     results = check_plagiarism(
-                        main_text,
-                        similarity_threshold
+                        document_text=main_text,
+                        similarity_threshold=similarity_threshold
                     )
 
                 except Exception as e:
 
                     st.error(
-                        f"Plagiarism check failed: {e}"
+                        "Plagiarism check failed."
                     )
 
-                    results = None
+                    st.exception(e)
 
-
-            if results is None:
-
-                st.stop()
+                    results = []
 
 
             if not results:
@@ -208,19 +179,19 @@ if uploaded_file:
             else:
 
                 st.warning(
-                    f"{len(results)} potential web-source "
-                    "match(es) found."
+                    f"{len(results)} potential match(es) found."
                 )
 
 
-                for index, item in enumerate(
+                for number, item in enumerate(
                     results,
                     start=1
                 ):
 
                     st.markdown(
-                        f"### Match {index}"
+                        f"### Match {number}"
                     )
+
 
                     similarity = item.get(
                         "similarity",
@@ -232,10 +203,12 @@ if uploaded_file:
                         f"{similarity}%"
                     )
 
+
                     url = item.get(
                         "url",
                         ""
                     )
+
 
                     if url:
 
@@ -248,6 +221,7 @@ if uploaded_file:
                         "snippet",
                         ""
                     )
+
 
                     if snippet:
 
@@ -265,6 +239,7 @@ if uploaded_file:
                         ""
                     )
 
+
                     if matched_text:
 
                         st.write(
@@ -275,21 +250,26 @@ if uploaded_file:
                             matched_text
                         )
 
+
                     st.divider()
 
 
-    # ======================================
+    # =====================================================
     # HUMANIZER
-    # ======================================
+    # =====================================================
 
-    with col2:
+    with right:
 
         st.subheader("✍️ Humanize Content")
 
-        if st.button(
+
+        humanize_button = st.button(
             "Humanize Content",
             use_container_width=True
-        ):
+        )
+
+
+        if humanize_button:
 
             with st.spinner(
                 "Rewriting content..."
@@ -304,10 +284,12 @@ if uploaded_file:
                 except Exception as e:
 
                     st.error(
-                        f"Humanization failed: {e}"
+                        "Humanization failed."
                     )
 
-                    humanized = None
+                    st.exception(e)
+
+                    humanized = ""
 
 
             if humanized:
@@ -331,4 +313,3 @@ if uploaded_file:
                     mime="text/plain",
                     use_container_width=True
                 )
-```
