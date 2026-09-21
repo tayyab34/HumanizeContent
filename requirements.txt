@@ -1,2 +1,5 @@
-
-streamlit>=1.38
+streamlit
+pymupdf
+python-docx
+python-pptx
+scikit-learn
