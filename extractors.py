@@ -1,64 +1,87 @@
 import io
+import re
 
 from pypdf import PdfReader
 from docx import Document
 
 
+def clean_text(text):
+    if not text:
+        return ""
+
+    text = text.replace("\x00", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()
+
+
 def extract_text(uploaded_file):
     """
-    Extract text from PDF, DOCX, or TXT Streamlit uploaded file.
+    Extract text from PDF, DOCX, or TXT files.
+    Compatible with Streamlit UploadedFile.
     """
+
+    if uploaded_file is None:
+        return ""
 
     filename = uploaded_file.name.lower()
 
-    # -----------------------------
+    # ==========================
     # TXT
-    # -----------------------------
+    # ==========================
+
     if filename.endswith(".txt"):
 
-        data = uploaded_file.getvalue()
+        raw = uploaded_file.getvalue()
 
-        return data.decode(
+        text = raw.decode(
             "utf-8",
             errors="ignore"
-        ).strip()
+        )
 
-    # -----------------------------
+        return clean_text(text)
+
+    # ==========================
     # PDF
-    # -----------------------------
+    # ==========================
+
     if filename.endswith(".pdf"):
 
-        data = uploaded_file.getvalue()
+        raw = uploaded_file.getvalue()
 
-        pdf_file = io.BytesIO(data)
-
-        reader = PdfReader(pdf_file)
+        pdf = PdfReader(
+            io.BytesIO(raw)
+        )
 
         pages = []
 
-        for page in reader.pages:
+        for page in pdf.pages:
 
             try:
-                text = page.extract_text()
+                page_text = page.extract_text()
 
-                if text:
-                    pages.append(text)
+                if page_text:
+                    pages.append(page_text)
 
             except Exception:
-                continue
+                pass
 
-        return "\n\n".join(pages).strip()
+        return clean_text(
+            "\n\n".join(pages)
+        )
 
-    # -----------------------------
+    # ==========================
     # DOCX
-    # -----------------------------
+    # ==========================
+
     if filename.endswith(".docx"):
 
-        data = uploaded_file.getvalue()
+        raw = uploaded_file.getvalue()
 
-        doc_file = io.BytesIO(data)
-
-        document = Document(doc_file)
+        document = Document(
+            io.BytesIO(raw)
+        )
 
         paragraphs = []
 
@@ -69,9 +92,28 @@ def extract_text(uploaded_file):
             if text:
                 paragraphs.append(text)
 
-        return "\n\n".join(
-            paragraphs
-        ).strip()
+        # Also extract table content
+        for table in document.tables:
+
+            for row in table.rows:
+
+                cells = []
+
+                for cell in row.cells:
+
+                    value = cell.text.strip()
+
+                    if value:
+                        cells.append(value)
+
+                if cells:
+                    paragraphs.append(
+                        " ".join(cells)
+                    )
+
+        return clean_text(
+            "\n\n".join(paragraphs)
+        )
 
     raise ValueError(
         "Unsupported file type. "
