@@ -1,183 +1,103 @@
 import streamlit as st
+from extractors import extract_text
+from embeddings import create_faiss_index
+from plagiarism import check_plagiarism
+from humanizer import humanize_text
 
 st.set_page_config(
-    page_title="AI Humanizer + Plagiarism Checker",
+    page_title="Humanize RAG",
     page_icon="📄",
     layout="wide"
 )
 
-st.title("📄 AI Humanizer + Plagiarism Checker")
+st.title("📄 AI Content Humanizer + Plagiarism Checker")
 
-st.write("Upload a PDF, DOCX, or TXT file.")
+with st.sidebar:
+    st.header("Settings")
 
-
-# --------------------------------------------------
-# FILE UPLOAD
-# --------------------------------------------------
+    similarity_threshold = st.slider(
+        "Similarity Threshold %",
+        0,
+        100,
+        70
+    )
 
 uploaded_file = st.file_uploader(
-    "Upload Document",
-    type=["txt", "pdf", "docx"]
+    "Upload PDF / DOCX / TXT",
+    type=["pdf", "docx", "txt"]
 )
 
+if uploaded_file:
 
-# --------------------------------------------------
-# MAIN TEXT
-# --------------------------------------------------
+    with st.spinner("Extracting text..."):
+        document_text = extract_text(uploaded_file)
 
-main_text = ""
+    st.success("Document loaded")
 
-
-if uploaded_file is not None:
-
-    try:
-
-        file_name = uploaded_file.name.lower()
-
-        # TXT
-        if file_name.endswith(".txt"):
-
-            main_text = uploaded_file.getvalue().decode(
-                "utf-8",
-                errors="ignore"
-            )
-
-
-        # PDF
-        elif file_name.endswith(".pdf"):
-
-            import pymupdf
-
-            pdf_bytes = uploaded_file.getvalue()
-
-            pdf = pymupdf.open(
-                stream=pdf_bytes,
-                filetype="pdf"
-            )
-
-            pages = []
-
-            for page in pdf:
-
-                text = page.get_text()
-
-                if text:
-                    pages.append(text)
-
-            pdf.close()
-
-            main_text = "\n\n".join(pages)
-
-
-        # DOCX
-        elif file_name.endswith(".docx"):
-
-            from docx import Document
-            from io import BytesIO
-
-            document = Document(
-                BytesIO(uploaded_file.getvalue())
-            )
-
-            paragraphs = []
-
-            for paragraph in document.paragraphs:
-
-                text = paragraph.text.strip()
-
-                if text:
-                    paragraphs.append(text)
-
-            main_text = "\n\n".join(paragraphs)
-
-
-    except Exception as e:
-
-        st.error("Error reading the uploaded file.")
-
-        st.exception(e)
-
-        main_text = ""
-
-
-# --------------------------------------------------
-# DOCUMENT PREVIEW
-# --------------------------------------------------
-
-if main_text:
-
-    st.success(
-        f"Document loaded successfully: {uploaded_file.name}"
-    )
-
-    st.subheader("📖 Document Preview")
+    st.subheader("Document Preview")
 
     st.text_area(
-        "Document Preview",
-        value=main_text[:12000],
-        height=300
+        "Text",
+        document_text[:5000],
+        height=250
     )
-
-
-    # --------------------------------------------------
-    # STATISTICS
-    # --------------------------------------------------
-
-    word_count = len(main_text.split())
-    character_count = len(main_text)
 
     col1, col2 = st.columns(2)
 
     with col1:
 
-        st.metric(
-            "Words",
-            word_count
-        )
+        if st.button("Check Plagiarism"):
+
+            with st.spinner("Searching web..."):
+
+                results = check_plagiarism(
+                    document_text,
+                    similarity_threshold
+                )
+
+            st.subheader("Plagiarism Results")
+
+            if not results:
+                st.success("No significant matches found.")
+
+            else:
+
+                for item in results:
+
+                    st.markdown("---")
+
+                    st.write(
+                        f"Similarity: {item['similarity']}%"
+                    )
+
+                    st.write(
+                        f"Source: {item['url']}"
+                    )
+
+                    st.write(
+                        item["snippet"]
+                    )
 
     with col2:
 
-        st.metric(
-            "Characters",
-            character_count
-        )
+        if st.button("Humanize Content"):
 
+            with st.spinner("Humanizing content..."):
 
-    st.divider()
+                humanized = humanize_text(
+                    document_text
+                )
 
+            st.subheader("Humanized Output")
 
-    # --------------------------------------------------
-    # ANALYZE
-    # --------------------------------------------------
+            st.text_area(
+                "Result",
+                humanized,
+                height=400
+            )
 
-    if st.button(
-        "Analyze Document",
-        use_container_width=True
-    ):
-
-        st.success(
-            "Document analyzed successfully."
-        )
-
-        st.subheader("Extracted Text")
-
-        st.text_area(
-            "Extracted Text",
-            value=main_text,
-            height=400
-        )
-
-
-else:
-
-    if uploaded_file is not None:
-
-        st.warning(
-            "No readable text was found in this document."
-        )
-
-    else:
-
-        st.info(
-            "Please upload a PDF, DOCX, or TXT file to begin."
-        )
+            st.download_button(
+                "Download",
+                humanized,
+                file_name="humanized.txt"
+            )
