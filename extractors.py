@@ -6,31 +6,37 @@ from docx import Document
 
 
 def clean_text(text):
+
     if not text:
         return ""
 
     text = text.replace("\x00", " ")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    text = re.sub(
+        r"[ \t]+",
+        " ",
+        text
+    )
+
+    text = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        text
+    )
 
     return text.strip()
 
 
 def extract_text(uploaded_file):
-    """
-    Extract text from PDF, DOCX, or TXT files.
-    Compatible with Streamlit UploadedFile.
-    """
 
     if uploaded_file is None:
         return ""
 
+
     filename = uploaded_file.name.lower()
 
-    # ==========================
-    # TXT
-    # ==========================
 
+    # TXT
     if filename.endswith(".txt"):
 
         raw = uploaded_file.getvalue()
@@ -42,10 +48,8 @@ def extract_text(uploaded_file):
 
         return clean_text(text)
 
-    # ==========================
-    # PDF
-    # ==========================
 
+    # PDF
     if filename.endswith(".pdf"):
 
         raw = uploaded_file.getvalue()
@@ -59,22 +63,21 @@ def extract_text(uploaded_file):
         for page in pdf.pages:
 
             try:
+
                 page_text = page.extract_text()
 
                 if page_text:
                     pages.append(page_text)
 
             except Exception:
-                pass
+                continue
 
         return clean_text(
             "\n\n".join(pages)
         )
 
-    # ==========================
-    # DOCX
-    # ==========================
 
+    # DOCX
     if filename.endswith(".docx"):
 
         raw = uploaded_file.getvalue()
@@ -85,6 +88,7 @@ def extract_text(uploaded_file):
 
         paragraphs = []
 
+
         for paragraph in document.paragraphs:
 
             text = paragraph.text.strip()
@@ -92,7 +96,8 @@ def extract_text(uploaded_file):
             if text:
                 paragraphs.append(text)
 
-        # Also extract table content
+
+        # Tables
         for table in document.tables:
 
             for row in table.rows:
@@ -106,14 +111,18 @@ def extract_text(uploaded_file):
                     if value:
                         cells.append(value)
 
+
                 if cells:
+
                     paragraphs.append(
                         " ".join(cells)
                     )
 
+
         return clean_text(
             "\n\n".join(paragraphs)
         )
+
 
     raise ValueError(
         "Unsupported file type. "
