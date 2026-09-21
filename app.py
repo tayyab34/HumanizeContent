@@ -37,10 +37,11 @@ if uploaded_file:
     st.subheader("Document Preview")
 
     st.text_area(
-        "Text",
-        document_text[:5000],
-        height=250
-    )
+    "Document Preview",
+    main_text[:12000],
+    height=300,
+    label_visibility="visible"
+)
 
     col1, col2 = st.columns(2)
 
