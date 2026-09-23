@@ -6,6 +6,7 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from google import genai
 
 
 def get_serpapi_key():
