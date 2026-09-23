@@ -1,16 +1,13 @@
 import os
 import streamlit as st
-from google import genai
+import google.generativeai as genai
 
 
 def get_api_key():
-
     try:
-        key = st.secrets["GOOGLE_API_KEY"]
+        return st.secrets["GOOGLE_API_KEY"]
     except Exception:
-        key = os.getenv("GOOGLE_API_KEY")
-
-    return key
+        return os.getenv("GOOGLE_API_KEY")
 
 
 def humanize_text(text):
@@ -22,31 +19,33 @@ def humanize_text(text):
             "GOOGLE_API_KEY not configured"
         )
 
-    client = genai.Client(
+    genai.configure(
         api_key=api_key
     )
 
+    model = genai.GenerativeModel(
+        "gemini-1.5-flash"
+    )
+
     prompt = f"""
-Rewrite the text so it reads naturally and professionally.
+Rewrite the following text so it sounds naturally human-written.
 
-Rules:
-
+Requirements:
 - Preserve meaning
-- Human writing style
+- Keep facts unchanged
+- Improve readability
 - Vary sentence structure
 - Remove repetitive AI wording
-- Keep facts unchanged
 - Do not summarize
 - Do not shorten
 
-Text:
+TEXT:
 
 {text}
 """
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt
+    response = model.generate_content(
+        prompt
     )
 
     return response.text
