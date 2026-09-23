@@ -1,553 +1,645 @@
-import re
+import base64
+import os
+import time
+import uuid
+from typing import Any, Dict, Optional
 
-import numpy as np
+import requests
 
-from embeddings import (
-    available as embeddings_available,
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+COPYLEAKS_LOGIN_URL = (
+    "https://id.copyleaks.com/v3/account/login/api"
 )
 
-from embeddings import (
-    cosine_similarity,
-    embed_texts,
+COPYLEAKS_SCAN_URL = (
+    "https://api.copyleaks.com/v3/scans/submit/file"
 )
 
-from extractors import (
-    extract_text_from_file,
-    filename,
+COPYLEAKS_RESULT_URL = (
+    "https://api.copyleaks.com/v3/scans"
+)
+
+DEFAULT_TIMEOUT = 60
+
+# For development/testing.
+# Set to false for real Copyleaks scanning.
+COPYLEAKS_SANDBOX = (
+    os.getenv("COPYLEAKS_SANDBOX", "false").lower()
+    == "true"
 )
 
 
-try:
+# ============================================================
+# ERROR
+# ============================================================
 
-    from sklearn.feature_extraction.text import (
-        TfidfVectorizer,
-    )
-
-    from sklearn.metrics.pairwise import (
-        cosine_similarity as sklearn_cosine,
-    )
-
-except ImportError:
-
-    TfidfVectorizer = None
-    sklearn_cosine = None
+class CopyleaksError(Exception):
+    """Raised when a Copyleaks request fails."""
 
 
-def normalize(text):
+# ============================================================
+# COPYLEAKS CLIENT
+# ============================================================
 
-    return re.sub(
-        r"\s+",
-        " ",
-        text.lower(),
-    ).strip()
+class CopyleaksClient:
 
-
-def words(text):
-
-    return re.findall(
-        r"\b[\w'-]+\b",
-        text,
-    )
-
-
-def word_count(text):
-
-    return len(
-        words(text)
-    )
-
-
-def sentence_count(text):
-
-    if not text.strip():
-        return 0
-
-    return len(
-        [
-            x
-            for x in re.split(
-                r"(?<=[.!?])\s+",
-                normalize(text),
-            )
-            if x.strip()
-        ]
-    )
-
-
-def chunks(
-    text,
-    max_words=160,
-    overlap=30,
-):
-
-    word_list = text.split()
-
-    if not word_list:
-        return []
-
-    output = []
-
-    start = 0
-
-    while start < len(word_list):
-
-        end = min(
-            len(word_list),
-            start + max_words,
-        )
-
-        output.append(
-            " ".join(
-                word_list[start:end]
-            )
-        )
-
-        if end == len(word_list):
-            break
-
-        start = max(
-            start + 1,
-            end - overlap,
-        )
-
-    return output
-
-
-def shingles(
-    text,
-    size=8,
-):
-
-    word_list = re.findall(
-        r"\b[\w'-]+\b",
-        normalize(text),
-    )
-
-    if len(word_list) < size:
-        return set()
-
-    return {
-        " ".join(
-            word_list[i:i + size]
-        )
-        for i in range(
-            len(word_list) - size + 1
-        )
-    }
-
-
-def phrase_overlap(
-    query,
-    reference,
-):
-
-    query_shingles = shingles(
-        query
-    )
-
-    reference_shingles = shingles(
-        reference
-    )
-
-    if not query_shingles:
-        return 0.0
-
-    return (
-        len(
-            query_shingles
-            & reference_shingles
-        )
-        / len(query_shingles)
-        * 100.0
-    )
-
-
-def tfidf_similarity(
-    query_chunks,
-    reference_chunks,
-):
-
-    if (
-        not query_chunks
-        or not reference_chunks
-        or TfidfVectorizer is None
-        or sklearn_cosine is None
+    def __init__(
+        self,
+        email: Optional[str] = None,
+        api_key: Optional[str] = None,
+        timeout: int = DEFAULT_TIMEOUT,
     ):
+        self.email = (
+            email
+            or os.getenv("COPYLEAKS_EMAIL")
+            or ""
+        ).strip()
 
-        return None
+        self.api_key = (
+            api_key
+            or os.getenv("COPYLEAKS_API_KEY")
+            or ""
+        ).strip()
 
-    try:
+        self.timeout = timeout
 
-        vectorizer = TfidfVectorizer(
-            lowercase=True,
-            stop_words="english",
-            ngram_range=(1, 2),
-            max_features=40000,
-        )
+        self.access_token: Optional[str] = None
 
-        matrix = vectorizer.fit_transform(
-            query_chunks
-            + reference_chunks
-        )
+    # ========================================================
+    # AUTHENTICATION
+    # ========================================================
 
-        q_matrix = matrix[
-            :len(query_chunks)
-        ]
+    def login(self) -> str:
 
-        r_matrix = matrix[
-            len(query_chunks):
-        ]
+        if not self.email:
+            raise CopyleaksError(
+                "COPYLEAKS_EMAIL is not configured."
+            )
 
-        scores = sklearn_cosine(
-            q_matrix,
-            r_matrix,
-        )
+        if not self.api_key:
+            raise CopyleaksError(
+                "COPYLEAKS_API_KEY is not configured."
+            )
 
-        return scores
-
-    except ValueError:
-
-        return None
-
-
-def compare_chunks(
-    query_chunks,
-    reference_chunks,
-    embedding_model="gemini-embedding-2",
-):
-
-    """
-    Returns one best reference match for every query chunk.
-
-    Gemini embeddings are used when available.
-    TF-IDF is used as a local fallback.
-    """
-
-    semantic_matrix = None
-
-    method = "TF-IDF"
-
-    if embeddings_available():
+        payload = {
+            "email": self.email,
+            "key": self.api_key,
+        }
 
         try:
-
-            all_texts = (
-                query_chunks
-                + reference_chunks
+            response = requests.post(
+                COPYLEAKS_LOGIN_URL,
+                json=payload,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                timeout=self.timeout,
             )
 
-            vectors = embed_texts(
-                all_texts,
-                model=embedding_model,
-                output_dimensionality=768,
+        except requests.RequestException as exc:
+            raise CopyleaksError(
+                f"Could not connect to Copyleaks: {exc}"
+            ) from exc
+
+        if response.status_code >= 400:
+            raise CopyleaksError(
+                "Copyleaks authentication failed. "
+                f"HTTP {response.status_code}: "
+                f"{response.text[:500]}"
             )
 
-            query_vectors = vectors[
-                :len(query_chunks)
-            ]
+        try:
+            data = response.json()
 
-            reference_vectors = vectors[
-                len(query_chunks):
-            ]
+        except ValueError as exc:
+            raise CopyleaksError(
+                "Copyleaks returned an invalid authentication response."
+            ) from exc
 
-            semantic_matrix = np.array(
-                [
-                    [
-                        cosine_similarity(
-                            q,
-                            r,
-                        )
-                        for r in reference_vectors
-                    ]
-                    for q in query_vectors
-                ]
+        token = data.get("access_token")
+
+        if not token:
+            raise CopyleaksError(
+                "Copyleaks authentication succeeded but "
+                "no access token was returned."
             )
 
-            method = (
-                "Gemini semantic embeddings"
+        self.access_token = token
+
+        return token
+
+    # ========================================================
+    # AUTH HEADER
+    # ========================================================
+
+    def _headers(self) -> Dict[str, str]:
+
+        if not self.access_token:
+            self.login()
+
+        return {
+            "Authorization": (
+                f"Bearer {self.access_token}"
+            ),
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+
+    # ========================================================
+    # SUBMIT FILE
+    # ========================================================
+
+    def submit_file(
+        self,
+        filename: str,
+        file_bytes: bytes,
+        scan_id: Optional[str] = None,
+        sandbox: Optional[bool] = None,
+    ) -> str:
+
+        if not filename:
+            raise CopyleaksError(
+                "Filename is required."
             )
 
-        except Exception:
+        if not file_bytes:
+            raise CopyleaksError(
+                "The uploaded file is empty."
+            )
 
-            semantic_matrix = None
+        if not scan_id:
+            scan_id = (
+                f"document-"
+                f"{uuid.uuid4().hex}"
+            )
 
-    if semantic_matrix is None:
+        if sandbox is None:
+            sandbox = COPYLEAKS_SANDBOX
 
-        tfidf = tfidf_similarity(
-            query_chunks,
-            reference_chunks,
+        encoded_file = base64.b64encode(
+            file_bytes
+        ).decode("utf-8")
+
+        payload = {
+            "base64": encoded_file,
+            "filename": filename,
+
+            "properties": {
+                "sandbox": sandbox,
+
+                # Webhook is intentionally omitted here.
+                # We poll the result from Streamlit instead.
+            },
+        }
+
+        url = (
+            f"{COPYLEAKS_SCAN_URL}/"
+            f"{scan_id}"
         )
 
-        if tfidf is None:
+        try:
+            response = requests.put(
+                url,
+                json=payload,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
 
-            return [], "keyword fallback"
+        except requests.RequestException as exc:
+            raise CopyleaksError(
+                f"Could not submit file to Copyleaks: {exc}"
+            ) from exc
 
-        semantic_matrix = tfidf
+        if response.status_code >= 400:
+            raise CopyleaksError(
+                "Copyleaks file submission failed. "
+                f"HTTP {response.status_code}: "
+                f"{response.text[:1000]}"
+            )
 
-        method = "TF-IDF"
+        return scan_id
 
-    matches = []
+    # ========================================================
+    # GET SCAN STATUS
+    # ========================================================
 
-    for query_index, query_chunk in enumerate(
-        query_chunks
-    ):
+    def get_scan_status(
+        self,
+        scan_id: str,
+    ) -> Any:
 
-        row = semantic_matrix[
-            query_index
-        ]
-
-        if len(row) == 0:
-            continue
-
-        reference_index = int(
-            np.argmax(row)
+        url = (
+            f"{COPYLEAKS_RESULT_URL}/"
+            f"{scan_id}/status"
         )
 
-        score = float(
-            row[reference_index]
-            * 100.0
-        )
+        try:
+            response = requests.get(
+                url,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
 
-        reference_chunk = (
-            reference_chunks[
-                reference_index
-            ]
-        )
+        except requests.RequestException as exc:
+            raise CopyleaksError(
+                f"Could not retrieve Copyleaks status: {exc}"
+            ) from exc
 
-        phrase_score = phrase_overlap(
-            query_chunk,
-            reference_chunk,
-        )
+        if response.status_code == 404:
+            return None
 
-        matches.append(
-            {
-                "query": query_chunk,
-                "reference": reference_chunk,
-                "semantic_similarity": score,
-                "phrase_overlap": phrase_score,
-                "reference_index": reference_index,
+        if response.status_code >= 400:
+            raise CopyleaksError(
+                "Could not retrieve Copyleaks scan status. "
+                f"HTTP {response.status_code}: "
+                f"{response.text[:500]}"
+            )
+
+        try:
+            return response.json()
+
+        except ValueError:
+            return {
+                "raw": response.text
             }
+
+    # ========================================================
+    # GET COMPLETED RESULT
+    # ========================================================
+
+    def get_result(
+        self,
+        scan_id: str,
+    ) -> Any:
+
+        url = (
+            f"{COPYLEAKS_RESULT_URL}/"
+            f"{scan_id}/result"
         )
-
-    return matches, method
-
-
-def analyze_document(
-    main_text,
-    reference_files,
-    use_gemini_embeddings=True,
-    embedding_model="gemini-embedding-2",
-    max_matches=40,
-):
-
-    reference_documents = []
-
-    for file_obj in (
-        reference_files or []
-    ):
 
         try:
-
-            text = extract_text_from_file(
-                file_obj
+            response = requests.get(
+                url,
+                headers=self._headers(),
+                timeout=self.timeout,
             )
 
-            if text.strip():
+        except requests.RequestException as exc:
+            raise CopyleaksError(
+                f"Could not retrieve Copyleaks result: {exc}"
+            ) from exc
 
-                reference_documents.append(
-                    {
-                        "source": filename(
-                            file_obj
-                        ),
-                        "text": text,
-                    }
-                )
-
-        except Exception as exc:
-
-            reference_documents.append(
-                {
-                    "source": filename(
-                        file_obj
-                    ),
-                    "text": "",
-                    "error": str(exc),
-                }
+        if response.status_code >= 400:
+            raise CopyleaksError(
+                "Could not retrieve Copyleaks result. "
+                f"HTTP {response.status_code}: "
+                f"{response.text[:1000]}"
             )
 
-    query_chunks = chunks(
-        main_text
-    )
+        try:
+            return response.json()
 
-    all_matches = []
+        except ValueError:
+            return {
+                "raw": response.text
+            }
 
-    source_scores = []
+    # ========================================================
+    # WAIT FOR RESULT
+    # ========================================================
 
-    total_reference_chunks = 0
+    def wait_for_result(
+        self,
+        scan_id: str,
+        max_wait_seconds: int = 180,
+        poll_seconds: int = 5,
+    ) -> Dict[str, Any]:
 
-    for reference in reference_documents:
+        start_time = time.time()
 
-        if not reference["text"]:
-            continue
-
-        reference_chunks = chunks(
-            reference["text"]
-        )
-
-        total_reference_chunks += len(
-            reference_chunks
-        )
-
-        if (
-            not query_chunks
-            or not reference_chunks
+        while (
+            time.time() - start_time
+            < max_wait_seconds
         ):
-            continue
 
-        matches, method = compare_chunks(
-            query_chunks,
-            reference_chunks,
-            embedding_model=embedding_model,
+            status = self.get_scan_status(
+                scan_id
+            )
+
+            if status:
+
+                status_text = str(
+                    status.get(
+                        "status",
+                        ""
+                    )
+                ).lower()
+
+                # Copyleaks may expose different status
+                # structures depending on the scan.
+                if status_text in {
+                    "completed",
+                    "complete",
+                    "finished",
+                    "done",
+                    "success",
+                }:
+
+                    result = self.get_result(
+                        scan_id
+                    )
+
+                    return {
+                        "scan_id": scan_id,
+                        "status": status_text,
+                        "result": result,
+                    }
+
+                if status_text in {
+                    "failed",
+                    "error",
+                    "cancelled",
+                }:
+
+                    raise CopyleaksError(
+                        f"Copyleaks scan failed: {status}"
+                    )
+
+            time.sleep(
+                max(1, poll_seconds)
+            )
+
+        raise CopyleaksError(
+            "Copyleaks scan did not complete "
+            f"within {max_wait_seconds} seconds."
         )
 
-        if matches:
 
-            scores = sorted(
-                [
-                    m["semantic_similarity"]
-                    for m in matches
-                ],
-                reverse=True,
+# ============================================================
+# GENERIC VALUE EXTRACTION
+# ============================================================
+
+def _find_values(
+    data: Any,
+    keywords,
+    path="",
+):
+    """
+    Recursively search Copyleaks responses.
+
+    This keeps the parser tolerant of response
+    structure changes.
+    """
+
+    results = []
+
+    if isinstance(data, dict):
+
+        for key, value in data.items():
+
+            current_path = (
+                f"{path}.{key}"
+                if path
+                else str(key)
             )
 
-            top_n = max(
-                1,
-                int(
-                    len(scores)
-                    * 0.25
-                ),
-            )
+            key_lower = str(key).lower()
 
-            source_similarity = float(
-                np.mean(
-                    scores[:top_n]
-                )
-            )
+            if any(
+                keyword in key_lower
+                for keyword in keywords
+            ):
 
-            source_scores.append(
-                {
-                    "source": reference[
-                        "source"
-                    ],
-                    "similarity": source_similarity,
-                    "method": method,
-                }
-            )
-
-            for match in matches:
-
-                if (
-                    match[
-                        "semantic_similarity"
-                    ] >= 50.0
-                    or
-                    match[
-                        "phrase_overlap"
-                    ] >= 2.0
+                if isinstance(
+                    value,
+                    (int, float, str, bool),
                 ):
-
-                    all_matches.append(
+                    results.append(
                         {
-                            "source": reference[
-                                "source"
-                            ],
-                            "semantic_similarity":
-                                match[
-                                    "semantic_similarity"
-                                ],
-                            "phrase_overlap":
-                                match[
-                                    "phrase_overlap"
-                                ],
-                            "query_excerpt":
-                                match[
-                                    "query"
-                                ][:1400],
-                            "reference_excerpt":
-                                match[
-                                    "reference"
-                                ][:1400],
+                            "field": current_path,
+                            "value": value,
                         }
                     )
 
-    source_scores.sort(
-        key=lambda item: item[
-            "similarity"
+            results.extend(
+                _find_values(
+                    value,
+                    keywords,
+                    current_path,
+                )
+            )
+
+    elif isinstance(data, list):
+
+        for index, value in enumerate(data):
+
+            results.extend(
+                _find_values(
+                    value,
+                    keywords,
+                    f"{path}[{index}]",
+                )
+            )
+
+    return results
+
+
+# ============================================================
+# EXTRACT PLAGIARISM INFORMATION
+# ============================================================
+
+def extract_plagiarism_result(
+    result: Any,
+) -> Dict[str, Any]:
+
+    matches = _find_values(
+        result,
+        [
+            "match",
+            "similarity",
+            "plagiarism",
+            "identical",
+            "risk",
         ],
-        reverse=True,
     )
 
-    all_matches.sort(
-        key=lambda item: (
-            item["phrase_overlap"],
-            item["semantic_similarity"],
-        ),
-        reverse=True,
+    sources = _find_values(
+        result,
+        [
+            "source",
+            "url",
+            "domain",
+        ],
     )
-
-    unique = []
-
-    seen = set()
-
-    for match in all_matches:
-
-        key = (
-            match["source"],
-            normalize(
-                match["query_excerpt"]
-            )[:250],
-        )
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-
-        unique.append(
-            match
-        )
 
     return {
+        "matches": matches,
+        "sources": sources,
+        "raw": result,
+    }
 
-        "word_count":
-            word_count(
-                main_text
-            ),
 
-        "sentence_count":
-            sentence_count(
-                main_text
-            ),
+# ============================================================
+# EXTRACT AI INFORMATION
+# ============================================================
 
-        "reference_count":
-            len(
-                reference_documents
-            ),
+def extract_ai_result(
+    result: Any,
+) -> Dict[str, Any]:
 
-        "reference_chunk_count":
-            total_reference_chunks,
+    ai_values = _find_values(
+        result,
+        [
+            "ai",
+            "generated",
+            "human",
+            "classification",
+        ],
+    )
 
-        "overall_similarity": (
-            source_scores[0][
-                "similarity"
-            ]
-            if source_scores
-            else None
+    return {
+        "ai_values": ai_values,
+        "raw": result,
+    }
+
+
+# ============================================================
+# MAIN DOCUMENT ANALYSIS
+# ============================================================
+
+def analyze_with_copyleaks(
+    filename: str,
+    file_bytes: bytes,
+    email: Optional[str] = None,
+    api_key: Optional[str] = None,
+    max_wait_seconds: int = 180,
+    sandbox: Optional[bool] = None,
+) -> Dict[str, Any]:
+
+    client = CopyleaksClient(
+        email=email,
+        api_key=api_key,
+    )
+
+    # Authenticate
+    client.login()
+
+    # Create unique scan ID
+    scan_id = (
+        f"humanizecontent-"
+        f"{uuid.uuid4().hex}"
+    )
+
+    # Submit
+    client.submit_file(
+        filename=filename,
+        file_bytes=file_bytes,
+        scan_id=scan_id,
+        sandbox=sandbox,
+    )
+
+    # Wait
+    response = client.wait_for_result(
+        scan_id=scan_id,
+        max_wait_seconds=max_wait_seconds,
+    )
+
+    raw_result = response.get(
+        "result",
+        {},
+    )
+
+    plagiarism = extract_plagiarism_result(
+        raw_result
+    )
+
+    ai = extract_ai_result(
+        raw_result
+    )
+
+    return {
+        "success": True,
+
+        "provider": "Copyleaks",
+
+        "scan_id": scan_id,
+
+        "status": response.get(
+            "status"
         ),
 
-        "source_scores":
-            source_scores,
+        "filename": filename,
 
-        "matches":
-            unique[:max_matches],
+        "plagiarism": plagiarism,
+
+        "ai_detection": ai,
+
+        "raw_result": raw_result,
+    }
+
+
+# ============================================================
+# EXISTING APP COMPATIBILITY
+# ============================================================
+
+def analyze_document(
+    main_text: str,
+    reference_files=None,
+    use_gemini_embeddings=False,
+    embedding_model=None,
+    **kwargs,
+):
+    """
+    Compatibility function for the existing Streamlit app.
+
+    IMPORTANT:
+    This function only performs the existing local-reference
+    analysis interface.
+
+    Copyleaks analysis requires the ORIGINAL FILE bytes,
+    therefore call:
+
+        analyze_with_copyleaks(...)
+
+    from the Streamlit upload handler.
+    """
+
+    word_count = (
+        len(main_text.split())
+        if main_text
+        else 0
+    )
+
+    sentence_count = 0
+
+    if main_text:
+        sentence_count = sum(
+            main_text.count(character)
+            for character in [".", "!", "?"]
+        )
+
+    reference_count = (
+        len(reference_files)
+        if reference_files
+        else 0
+    )
+
+    return {
+        "word_count": word_count,
+        "sentence_count": sentence_count,
+        "reference_count": reference_count,
+        "reference_chunk_count": 0,
+        "overall_similarity": None,
+        "source_scores": [],
+        "matches": [],
+        "provider": "Copyleaks",
+        "message": (
+            "Use analyze_with_copyleaks() "
+            "for Copyleaks plagiarism and AI detection."
+        ),
     }
