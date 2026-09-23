@@ -1,523 +1,553 @@
-# plagiarism.py
+import re
 
-import json
-import os
-from typing import Any, Dict, List, Optional
+import numpy as np
 
-import requests
-
-
-TURNITIN_API_URL = os.getenv(
-    "TURNITIN_API_URL",
-    "https://turnitin-api.herokuapp.com"
+from embeddings import (
+    available as embeddings_available,
 )
 
-DEFAULT_TIMEOUT = 60
+from embeddings import (
+    cosine_similarity,
+    embed_texts,
+)
 
+from extractors import (
+    extract_text_from_file,
+    filename,
+)
 
-class TurnitinAPIError(Exception):
-    """Raised when the Turnitin API request fails."""
 
+try:
 
-class TurnitinAPIClient:
-    """
-    Client for the unofficial r2dev2/Turnitin-API.
-
-    Supported operations:
-        - Login
-        - Get courses
-        - Get assignments
-        - Download submission
-        - Submit document
-
-    Note:
-        The upstream API does not document a dedicated plagiarism
-        percentage or AI-writing detection endpoint.
-    """
-
-    def __init__(
-        self,
-        email: str,
-        password: str,
-        base_url: str = TURNITIN_API_URL,
-        timeout: int = DEFAULT_TIMEOUT,
-    ):
-        self.email = email.strip()
-        self.password = password
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-
-        self.session = requests.Session()
-        self.auth: Optional[Dict[str, Any]] = None
-
-    # ---------------------------------------------------------
-    # Internal request helper
-    # ---------------------------------------------------------
-
-    def _post_json(
-        self,
-        endpoint: str,
-        payload: Dict[str, Any],
-    ) -> Any:
-
-        url = f"{self.base_url}/{endpoint.lstrip('/')}"
-
-        try:
-            response = self.session.post(
-                url,
-                json=payload,
-                timeout=self.timeout,
-            )
-        except requests.RequestException as exc:
-            raise TurnitinAPIError(
-                f"Could not connect to Turnitin API: {exc}"
-            ) from exc
-
-        if response.status_code >= 400:
-            raise TurnitinAPIError(
-                f"Turnitin API returned HTTP "
-                f"{response.status_code}: {response.text[:500]}"
-            )
-
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise TurnitinAPIError(
-                "Turnitin API returned an invalid JSON response."
-            ) from exc
-
-    # ---------------------------------------------------------
-    # LOGIN
-    # ---------------------------------------------------------
-
-    def login(self) -> Dict[str, Any]:
-
-        if not self.email:
-            raise TurnitinAPIError(
-                "Turnitin email is required."
-            )
-
-        if not self.password:
-            raise TurnitinAPIError(
-                "Turnitin password is required."
-            )
-
-        result = self._post_json(
-            "/login",
-            {
-                "email": self.email,
-                "password": self.password,
-            },
-        )
-
-        if not isinstance(result, dict):
-            raise TurnitinAPIError(
-                "Unexpected response received from Turnitin login."
-            )
-
-        if "auth" not in result:
-            raise TurnitinAPIError(
-                "Turnitin login failed: authentication information "
-                "was not returned."
-            )
-
-        self.auth = result
-
-        return result
-
-    # ---------------------------------------------------------
-    # AUTH CHECK
-    # ---------------------------------------------------------
-
-    def _require_auth(self):
-
-        if not self.auth:
-            raise TurnitinAPIError(
-                "You must login to Turnitin before continuing."
-            )
-
-    # ---------------------------------------------------------
-    # COURSES
-    # ---------------------------------------------------------
-
-    def get_courses(self) -> List[Dict[str, Any]]:
-
-        self._require_auth()
-
-        result = self._post_json(
-            "/courses",
-            self.auth,
-        )
-
-        if not isinstance(result, list):
-            raise TurnitinAPIError(
-                "Unexpected courses response from Turnitin."
-            )
-
-        return result
-
-    # ---------------------------------------------------------
-    # ASSIGNMENTS
-    # ---------------------------------------------------------
-
-    def get_assignments(
-        self,
-        course: Dict[str, Any],
-    ) -> List[Dict[str, Any]]:
-
-        self._require_auth()
-
-        if not course:
-            raise TurnitinAPIError(
-                "A Turnitin course is required."
-            )
-
-        payload = dict(self.auth)
-
-        payload["course"] = course
-
-        result = self._post_json(
-            "/assignments",
-            payload,
-        )
-
-        if not isinstance(result, list):
-            raise TurnitinAPIError(
-                "Unexpected assignments response from Turnitin."
-            )
-
-        return result
-
-    # ---------------------------------------------------------
-    # DOWNLOAD
-    # ---------------------------------------------------------
-
-    def download_submission(
-        self,
-        assignment: Dict[str, Any],
-        pdf: bool = False,
-    ) -> bytes:
-
-        self._require_auth()
-
-        if not assignment:
-            raise TurnitinAPIError(
-                "A Turnitin assignment is required."
-            )
-
-        payload = dict(self.auth)
-
-        payload["assignment"] = assignment
-        payload["pdf"] = pdf
-
-        url = f"{self.base_url}/download"
-
-        try:
-            response = self.session.post(
-                url,
-                json=payload,
-                timeout=self.timeout,
-            )
-        except requests.RequestException as exc:
-            raise TurnitinAPIError(
-                f"Could not download the Turnitin submission: {exc}"
-            ) from exc
-
-        if response.status_code >= 400:
-            raise TurnitinAPIError(
-                f"Turnitin download failed with HTTP "
-                f"{response.status_code}."
-            )
-
-        return response.content
-
-    # ---------------------------------------------------------
-    # SUBMIT
-    # ---------------------------------------------------------
-
-    def submit_document(
-        self,
-        assignment: Dict[str, Any],
-        filename: str,
-        file_bytes: bytes,
-        title: Optional[str] = None,
-    ) -> Dict[str, Any]:
-
-        self._require_auth()
-
-        if not assignment:
-            raise TurnitinAPIError(
-                "A Turnitin assignment is required."
-            )
-
-        if not filename:
-            raise TurnitinAPIError(
-                "A filename is required."
-            )
-
-        if not file_bytes:
-            raise TurnitinAPIError(
-                "The uploaded document is empty."
-            )
-
-        title = title or filename
-
-        # The repository expects auth and assignment as JSON strings
-        # inside multipart/form-data.
-        form_data = {
-            "auth": json.dumps(self.auth["auth"]),
-            "assignment": json.dumps(assignment),
-            "title": title,
-            "filename": filename,
-        }
-
-        files = {
-            "userfile": (
-                filename,
-                file_bytes,
-            )
-        }
-
-        url = f"{self.base_url}/submit"
-
-        try:
-            response = self.session.post(
-                url,
-                data=form_data,
-                files=files,
-                timeout=self.timeout,
-            )
-        except requests.RequestException as exc:
-            raise TurnitinAPIError(
-                f"Could not submit document to Turnitin: {exc}"
-            ) from exc
-
-        if response.status_code >= 400:
-            raise TurnitinAPIError(
-                f"Turnitin submission failed with HTTP "
-                f"{response.status_code}: {response.text[:500]}"
-            )
-
-        try:
-            result = response.json()
-        except ValueError as exc:
-            raise TurnitinAPIError(
-                "Turnitin returned an invalid submission response."
-            ) from exc
-
-        if not isinstance(result, dict):
-            raise TurnitinAPIError(
-                "Unexpected Turnitin submission response."
-            )
-
-        return result
-
-
-# =============================================================
-# HIGH-LEVEL PLAGIARISM ANALYSIS
-# =============================================================
-
-def analyze_with_turnitin(
-    email: str,
-    password: str,
-    filename: str,
-    file_bytes: bytes,
-    course_title: Optional[str] = None,
-    assignment_title: Optional[str] = None,
-    base_url: str = TURNITIN_API_URL,
-) -> Dict[str, Any]:
-    """
-    Submit a document through the r2dev2 Turnitin API.
-
-    Workflow:
-
-        Login
-          ↓
-        Courses
-          ↓
-        Select Course
-          ↓
-        Assignments
-          ↓
-        Select Assignment
-          ↓
-        Submit Document
-
-    Returns:
-        Turnitin submission response.
-    """
-
-    client = TurnitinAPIClient(
-        email=email,
-        password=password,
-        base_url=base_url,
+    from sklearn.feature_extraction.text import (
+        TfidfVectorizer,
     )
 
-    # ---------------------------------------------------------
-    # Login
-    # ---------------------------------------------------------
-
-    client.login()
-
-    # ---------------------------------------------------------
-    # Courses
-    # ---------------------------------------------------------
-
-    courses = client.get_courses()
-
-    if not courses:
-        raise TurnitinAPIError(
-            "No Turnitin courses were returned."
-        )
-
-    selected_course = None
-
-    if course_title:
-
-        for course in courses:
-
-            if course.get("title") == course_title:
-                selected_course = course
-                break
-
-        if selected_course is None:
-            # Also allow partial title matching.
-            for course in courses:
-
-                title = str(
-                    course.get("title", "")
-                ).lower()
-
-                if course_title.lower() in title:
-                    selected_course = course
-                    break
-
-    if selected_course is None:
-        selected_course = courses[0]
-
-    # ---------------------------------------------------------
-    # Assignments
-    # ---------------------------------------------------------
-
-    assignments = client.get_assignments(
-        selected_course
+    from sklearn.metrics.pairwise import (
+        cosine_similarity as sklearn_cosine,
     )
 
-    if not assignments:
-        raise TurnitinAPIError(
-            "No Turnitin assignments were returned "
-            "for the selected course."
-        )
+except ImportError:
 
-    selected_assignment = None
+    TfidfVectorizer = None
+    sklearn_cosine = None
 
-    if assignment_title:
 
-        for assignment in assignments:
+def normalize(text):
 
-            if assignment.get("title") == assignment_title:
-                selected_assignment = assignment
-                break
+    return re.sub(
+        r"\s+",
+        " ",
+        text.lower(),
+    ).strip()
 
-        if selected_assignment is None:
 
-            for assignment in assignments:
+def words(text):
 
-                title = str(
-                    assignment.get("title", "")
-                ).lower()
-
-                if assignment_title.lower() in title:
-                    selected_assignment = assignment
-                    break
-
-    if selected_assignment is None:
-        selected_assignment = assignments[0]
-
-    # ---------------------------------------------------------
-    # Submit
-    # ---------------------------------------------------------
-
-    result = client.submit_document(
-        assignment=selected_assignment,
-        filename=filename,
-        file_bytes=file_bytes,
-        title=filename,
+    return re.findall(
+        r"\b[\w'-]+\b",
+        text,
     )
 
-    # ---------------------------------------------------------
-    # Normalize result
-    # ---------------------------------------------------------
+
+def word_count(text):
+
+    return len(
+        words(text)
+    )
+
+
+def sentence_count(text):
+
+    if not text.strip():
+        return 0
+
+    return len(
+        [
+            x
+            for x in re.split(
+                r"(?<=[.!?])\s+",
+                normalize(text),
+            )
+            if x.strip()
+        ]
+    )
+
+
+def chunks(
+    text,
+    max_words=160,
+    overlap=30,
+):
+
+    word_list = text.split()
+
+    if not word_list:
+        return []
+
+    output = []
+
+    start = 0
+
+    while start < len(word_list):
+
+        end = min(
+            len(word_list),
+            start + max_words,
+        )
+
+        output.append(
+            " ".join(
+                word_list[start:end]
+            )
+        )
+
+        if end == len(word_list):
+            break
+
+        start = max(
+            start + 1,
+            end - overlap,
+        )
+
+    return output
+
+
+def shingles(
+    text,
+    size=8,
+):
+
+    word_list = re.findall(
+        r"\b[\w'-]+\b",
+        normalize(text),
+    )
+
+    if len(word_list) < size:
+        return set()
 
     return {
-        "success": result.get("status") == 1,
-        "status": result.get("status"),
-        "uuid": result.get("uuid"),
-        "file_name": result.get("file_name"),
-        "file_size": result.get("file_size"),
-        "page_count": result.get("page_count"),
-        "word_count": result.get("word_count"),
-        "char_count": result.get("char_count"),
-        "image_url_stub": result.get("image_url_stub"),
-        "course": selected_course,
-        "assignment": selected_assignment,
-        "raw_response": result,
+        " ".join(
+            word_list[i:i + size]
+        )
+        for i in range(
+            len(word_list) - size + 1
+        )
     }
 
 
-# =============================================================
-# COMPATIBILITY FUNCTION
-# =============================================================
-
-def analyze_document(
-    text: str = "",
-    reference_files=None,
-    use_gemini_embeddings: bool = False,
-    embedding_model: Optional[str] = None,
-    **kwargs,
+def phrase_overlap(
+    query,
+    reference,
 ):
-    """
-    Compatibility wrapper.
 
-    This function intentionally does NOT claim that local semantic
-    similarity is Turnitin plagiarism detection.
-
-    It is kept so existing application code does not break.
-
-    For actual Turnitin processing, use:
-
-        analyze_with_turnitin(...)
-    """
-
-    word_count = len(
-        text.split()
-    ) if text else 0
-
-    sentence_count = 0
-
-    if text:
-        sentence_count = sum(
-            text.count(char)
-            for char in [".", "!", "?"]
-        )
-
-    reference_count = (
-        len(reference_files)
-        if reference_files
-        else 0
+    query_shingles = shingles(
+        query
     )
 
-    return {
-        "word_count": word_count,
-        "sentence_count": sentence_count,
-        "reference_count": reference_count,
-        "reference_chunk_count": 0,
-        "overall_similarity": None,
-        "source_scores": [],
-        "matches": [],
-        "message": (
-            "No Turnitin similarity percentage is calculated "
-            "by this function. Use analyze_with_turnitin() "
-            "to submit the document to Turnitin."
+    reference_shingles = shingles(
+        reference
+    )
+
+    if not query_shingles:
+        return 0.0
+
+    return (
+        len(
+            query_shingles
+            & reference_shingles
+        )
+        / len(query_shingles)
+        * 100.0
+    )
+
+
+def tfidf_similarity(
+    query_chunks,
+    reference_chunks,
+):
+
+    if (
+        not query_chunks
+        or not reference_chunks
+        or TfidfVectorizer is None
+        or sklearn_cosine is None
+    ):
+
+        return None
+
+    try:
+
+        vectorizer = TfidfVectorizer(
+            lowercase=True,
+            stop_words="english",
+            ngram_range=(1, 2),
+            max_features=40000,
+        )
+
+        matrix = vectorizer.fit_transform(
+            query_chunks
+            + reference_chunks
+        )
+
+        q_matrix = matrix[
+            :len(query_chunks)
+        ]
+
+        r_matrix = matrix[
+            len(query_chunks):
+        ]
+
+        scores = sklearn_cosine(
+            q_matrix,
+            r_matrix,
+        )
+
+        return scores
+
+    except ValueError:
+
+        return None
+
+
+def compare_chunks(
+    query_chunks,
+    reference_chunks,
+    embedding_model="gemini-embedding-2",
+):
+
+    """
+    Returns one best reference match for every query chunk.
+
+    Gemini embeddings are used when available.
+    TF-IDF is used as a local fallback.
+    """
+
+    semantic_matrix = None
+
+    method = "TF-IDF"
+
+    if embeddings_available():
+
+        try:
+
+            all_texts = (
+                query_chunks
+                + reference_chunks
+            )
+
+            vectors = embed_texts(
+                all_texts,
+                model=embedding_model,
+                output_dimensionality=768,
+            )
+
+            query_vectors = vectors[
+                :len(query_chunks)
+            ]
+
+            reference_vectors = vectors[
+                len(query_chunks):
+            ]
+
+            semantic_matrix = np.array(
+                [
+                    [
+                        cosine_similarity(
+                            q,
+                            r,
+                        )
+                        for r in reference_vectors
+                    ]
+                    for q in query_vectors
+                ]
+            )
+
+            method = (
+                "Gemini semantic embeddings"
+            )
+
+        except Exception:
+
+            semantic_matrix = None
+
+    if semantic_matrix is None:
+
+        tfidf = tfidf_similarity(
+            query_chunks,
+            reference_chunks,
+        )
+
+        if tfidf is None:
+
+            return [], "keyword fallback"
+
+        semantic_matrix = tfidf
+
+        method = "TF-IDF"
+
+    matches = []
+
+    for query_index, query_chunk in enumerate(
+        query_chunks
+    ):
+
+        row = semantic_matrix[
+            query_index
+        ]
+
+        if len(row) == 0:
+            continue
+
+        reference_index = int(
+            np.argmax(row)
+        )
+
+        score = float(
+            row[reference_index]
+            * 100.0
+        )
+
+        reference_chunk = (
+            reference_chunks[
+                reference_index
+            ]
+        )
+
+        phrase_score = phrase_overlap(
+            query_chunk,
+            reference_chunk,
+        )
+
+        matches.append(
+            {
+                "query": query_chunk,
+                "reference": reference_chunk,
+                "semantic_similarity": score,
+                "phrase_overlap": phrase_score,
+                "reference_index": reference_index,
+            }
+        )
+
+    return matches, method
+
+
+def analyze_document(
+    main_text,
+    reference_files,
+    use_gemini_embeddings=True,
+    embedding_model="gemini-embedding-2",
+    max_matches=40,
+):
+
+    reference_documents = []
+
+    for file_obj in (
+        reference_files or []
+    ):
+
+        try:
+
+            text = extract_text_from_file(
+                file_obj
+            )
+
+            if text.strip():
+
+                reference_documents.append(
+                    {
+                        "source": filename(
+                            file_obj
+                        ),
+                        "text": text,
+                    }
+                )
+
+        except Exception as exc:
+
+            reference_documents.append(
+                {
+                    "source": filename(
+                        file_obj
+                    ),
+                    "text": "",
+                    "error": str(exc),
+                }
+            )
+
+    query_chunks = chunks(
+        main_text
+    )
+
+    all_matches = []
+
+    source_scores = []
+
+    total_reference_chunks = 0
+
+    for reference in reference_documents:
+
+        if not reference["text"]:
+            continue
+
+        reference_chunks = chunks(
+            reference["text"]
+        )
+
+        total_reference_chunks += len(
+            reference_chunks
+        )
+
+        if (
+            not query_chunks
+            or not reference_chunks
+        ):
+            continue
+
+        matches, method = compare_chunks(
+            query_chunks,
+            reference_chunks,
+            embedding_model=embedding_model,
+        )
+
+        if matches:
+
+            scores = sorted(
+                [
+                    m["semantic_similarity"]
+                    for m in matches
+                ],
+                reverse=True,
+            )
+
+            top_n = max(
+                1,
+                int(
+                    len(scores)
+                    * 0.25
+                ),
+            )
+
+            source_similarity = float(
+                np.mean(
+                    scores[:top_n]
+                )
+            )
+
+            source_scores.append(
+                {
+                    "source": reference[
+                        "source"
+                    ],
+                    "similarity": source_similarity,
+                    "method": method,
+                }
+            )
+
+            for match in matches:
+
+                if (
+                    match[
+                        "semantic_similarity"
+                    ] >= 50.0
+                    or
+                    match[
+                        "phrase_overlap"
+                    ] >= 2.0
+                ):
+
+                    all_matches.append(
+                        {
+                            "source": reference[
+                                "source"
+                            ],
+                            "semantic_similarity":
+                                match[
+                                    "semantic_similarity"
+                                ],
+                            "phrase_overlap":
+                                match[
+                                    "phrase_overlap"
+                                ],
+                            "query_excerpt":
+                                match[
+                                    "query"
+                                ][:1400],
+                            "reference_excerpt":
+                                match[
+                                    "reference"
+                                ][:1400],
+                        }
+                    )
+
+    source_scores.sort(
+        key=lambda item: item[
+            "similarity"
+        ],
+        reverse=True,
+    )
+
+    all_matches.sort(
+        key=lambda item: (
+            item["phrase_overlap"],
+            item["semantic_similarity"],
         ),
+        reverse=True,
+    )
+
+    unique = []
+
+    seen = set()
+
+    for match in all_matches:
+
+        key = (
+            match["source"],
+            normalize(
+                match["query_excerpt"]
+            )[:250],
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        unique.append(
+            match
+        )
+
+    return {
+
+        "word_count":
+            word_count(
+                main_text
+            ),
+
+        "sentence_count":
+            sentence_count(
+                main_text
+            ),
+
+        "reference_count":
+            len(
+                reference_documents
+            ),
+
+        "reference_chunk_count":
+            total_reference_chunks,
+
+        "overall_similarity": (
+            source_scores[0][
+                "similarity"
+            ]
+            if source_scores
+            else None
+        ),
+
+        "source_scores":
+            source_scores,
+
+        "matches":
+            unique[:max_matches],
     }
