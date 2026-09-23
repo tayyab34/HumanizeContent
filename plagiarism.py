@@ -3,14 +3,12 @@ import re
 import requests
 import streamlit as st
 
-from embeddings import create_faiss_index, search_similar
+from bs4 import BeautifulSoup
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 
 def get_serpapi_key():
-    """
-    Get SERP API key from Streamlit secrets or environment variables.
-    """
-
     try:
         key = st.secrets.get("SERPAPI_KEY", "")
     except Exception:
@@ -23,30 +21,14 @@ def get_serpapi_key():
 
 
 def clean_text(text):
-    """
-    Clean text before searching.
-    """
-
     if not text:
         return ""
 
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
-
+    text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
-def split_into_chunks(
-    text,
-    chunk_size=500,
-    overlap=100
-):
-    """
-    Split document into smaller chunks.
-    """
+def split_into_chunks(text, chunk_size=120, overlap=30):
 
     text = clean_text(text)
 
@@ -61,14 +43,9 @@ def split_into_chunks(
 
     while start < len(words):
 
-        end = min(
-            start + chunk_size,
-            len(words)
-        )
+        end = min(start + chunk_size, len(words))
 
-        chunk = " ".join(
-            words[start:end]
-        )
+        chunk = " ".join(words[start:end])
 
         if chunk:
             chunks.append(chunk)
@@ -82,12 +59,6 @@ def split_into_chunks(
 
 
 def search_web(query, api_key, num_results=5):
-    """
-    Search Google through SERP API.
-    """
-
-    if not api_key:
-        return []
 
     params = {
         "engine": "google",
@@ -108,63 +79,77 @@ def search_web(query, api_key, num_results=5):
 
         data = response.json()
 
-        return data.get(
-            "organic_results",
-            []
+        return data.get("organic_results", [])
+
+    except Exception:
+        return []
+
+
+def extract_page_text(url):
+
+    headers = {
+        "User-Agent":
+        "Mozilla/5.0"
+    }
+
+    try:
+
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=20
         )
 
-    except requests.RequestException:
-        return []
+        response.raise_for_status()
 
-    except ValueError:
-        return []
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+        for tag in soup(
+            [
+                "script",
+                "style",
+                "noscript",
+                "header",
+                "footer",
+                "nav"
+            ]
+        ):
+            tag.decompose()
+
+        text = soup.get_text(" ")
+
+        text = clean_text(text)
+
+        return text[:50000]
+
+    except Exception:
+        return ""
 
 
-def calculate_similarity(
-    query,
-    source_text
-):
-    """
-    Calculate TF-IDF cosine similarity.
-    """
+def calculate_similarity(text1, text2):
 
-    if not query or not source_text:
+    if not text1 or not text2:
         return 0.0
 
     try:
 
-        index, vectorizer = create_faiss_index(
-            [source_text]
+        vectorizer = TfidfVectorizer(
+            stop_words="english"
         )
 
-        if index is None:
-            return 0.0
-
-        matches = search_similar(
-            query,
-            [source_text],
-            index,
-            vectorizer,
-            top_k=1
+        vectors = vectorizer.fit_transform(
+            [text1, text2]
         )
 
-        if not matches:
-            return 0.0
+        score = cosine_similarity(
+            vectors[0:1],
+            vectors[1:2]
+        )[0][0]
 
-        score = matches[0]["score"]
-
-        score = max(
-            0.0,
-            min(
-                1.0,
-                score
-            )
-        )
-
-        return round(
-            score * 100,
-            2
-        )
+        return round(score * 100, 2)
 
     except Exception:
         return 0.0
@@ -172,19 +157,9 @@ def calculate_similarity(
 
 def check_plagiarism(
     document_text,
-    similarity_threshold=70,
-    max_sources=5
+    similarity_threshold=20,
+    max_sources=10
 ):
-    """
-    Search document content against web sources.
-
-    Returns:
-        list of dictionaries containing:
-        similarity
-        url
-        title
-        snippet
-    """
 
     if not document_text:
         return []
@@ -193,14 +168,13 @@ def check_plagiarism(
 
     if not api_key:
         raise ValueError(
-            "SERPAPI_KEY is not configured. "
-            "Add SERPAPI_KEY to Streamlit Secrets."
+            "SERPAPI_KEY not found."
         )
 
     chunks = split_into_chunks(
         document_text,
-        chunk_size=80,
-        overlap=20
+        chunk_size=120,
+        overlap=30
     )
 
     if not chunks:
@@ -210,37 +184,28 @@ def check_plagiarism(
 
     seen_urls = set()
 
-    # Search only a limited number of chunks
-    # to avoid excessive SERP API usage.
     chunks_to_search = chunks[:10]
 
     for chunk in chunks_to_search:
 
-        # Use a meaningful search query.
-        query_words = chunk.split()
+        words = chunk.split()
 
-        if len(query_words) > 35:
-            query_words = query_words[:35]
+        query_text = " ".join(words[:20])
 
-        query = " ".join(
-            query_words
-        )
-
-        if not query:
+        if not query_text:
             continue
 
-        web_results = search_web(
+        query = f'"{query_text}"'
+
+        search_results = search_web(
             query,
             api_key,
-            num_results=max_sources
+            num_results=5
         )
 
-        for item in web_results:
+        for item in search_results:
 
-            url = item.get(
-                "link",
-                ""
-            )
+            url = item.get("link", "")
 
             if not url:
                 continue
@@ -260,26 +225,28 @@ def check_plagiarism(
                 ""
             )
 
-            source_text = " ".join(
-                [
-                    title,
-                    snippet
-                ]
+            page_text = extract_page_text(
+                url
             )
+
+            if not page_text:
+                continue
 
             similarity = calculate_similarity(
                 chunk,
-                source_text
+                page_text
             )
 
             if similarity >= similarity_threshold:
 
-                results.append({
-                    "similarity": similarity,
-                    "url": url,
-                    "title": title,
-                    "snippet": snippet
-                })
+                results.append(
+                    {
+                        "similarity": similarity,
+                        "url": url,
+                        "title": title,
+                        "snippet": snippet
+                    }
+                )
 
     results.sort(
         key=lambda x: x["similarity"],
