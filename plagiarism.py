@@ -1,257 +1,553 @@
-import os
 import re
-import requests
-import streamlit as st
 
-from bs4 import BeautifulSoup
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from google import genai
+import numpy as np
 
+from embeddings import (
+    available as embeddings_available,
+)
 
-def get_serpapi_key():
-    try:
-        key = st.secrets.get("SERPAPI_KEY", "")
-    except Exception:
-        key = ""
+from embeddings import (
+    cosine_similarity,
+    embed_texts,
+)
 
-    if not key:
-        key = os.getenv("SERPAPI_KEY", "")
-
-    return key
+from extractors import (
+    extract_text_from_file,
+    filename,
+)
 
 
-def clean_text(text):
-    if not text:
-        return ""
+try:
 
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    from sklearn.feature_extraction.text import (
+        TfidfVectorizer,
+    )
+
+    from sklearn.metrics.pairwise import (
+        cosine_similarity as sklearn_cosine,
+    )
+
+except ImportError:
+
+    TfidfVectorizer = None
+    sklearn_cosine = None
 
 
-def split_into_chunks(text, chunk_size=120, overlap=30):
+def normalize(text):
 
-    text = clean_text(text)
+    return re.sub(
+        r"\s+",
+        " ",
+        text.lower(),
+    ).strip()
 
-    if not text:
+
+def words(text):
+
+    return re.findall(
+        r"\b[\w'-]+\b",
+        text,
+    )
+
+
+def word_count(text):
+
+    return len(
+        words(text)
+    )
+
+
+def sentence_count(text):
+
+    if not text.strip():
+        return 0
+
+    return len(
+        [
+            x
+            for x in re.split(
+                r"(?<=[.!?])\s+",
+                normalize(text),
+            )
+            if x.strip()
+        ]
+    )
+
+
+def chunks(
+    text,
+    max_words=160,
+    overlap=30,
+):
+
+    word_list = text.split()
+
+    if not word_list:
         return []
 
-    words = text.split()
-
-    chunks = []
+    output = []
 
     start = 0
 
-    while start < len(words):
+    while start < len(word_list):
 
-        end = min(start + chunk_size, len(words))
+        end = min(
+            len(word_list),
+            start + max_words,
+        )
 
-        chunk = " ".join(words[start:end])
+        output.append(
+            " ".join(
+                word_list[start:end]
+            )
+        )
 
-        if chunk:
-            chunks.append(chunk)
-
-        if end >= len(words):
+        if end == len(word_list):
             break
 
-        start = end - overlap
+        start = max(
+            start + 1,
+            end - overlap,
+        )
 
-    return chunks
+    return output
 
 
-def search_web(query, api_key, num_results=5):
+def shingles(
+    text,
+    size=8,
+):
 
-    params = {
-        "engine": "google",
-        "q": query,
-        "api_key": api_key,
-        "num": num_results
+    word_list = re.findall(
+        r"\b[\w'-]+\b",
+        normalize(text),
+    )
+
+    if len(word_list) < size:
+        return set()
+
+    return {
+        " ".join(
+            word_list[i:i + size]
+        )
+        for i in range(
+            len(word_list) - size + 1
+        )
     }
 
-    try:
 
-        response = requests.get(
-            "https://serpapi.com/search.json",
-            params=params,
-            timeout=30
-        )
+def phrase_overlap(
+    query,
+    reference,
+):
 
-        response.raise_for_status()
+    query_shingles = shingles(
+        query
+    )
 
-        data = response.json()
+    reference_shingles = shingles(
+        reference
+    )
 
-        return data.get("organic_results", [])
-
-    except Exception:
-        return []
-
-
-def extract_page_text(url):
-
-    headers = {
-        "User-Agent":
-        "Mozilla/5.0"
-    }
-
-    try:
-
-        response = requests.get(
-            url,
-            headers=headers,
-            timeout=20
-        )
-
-        response.raise_for_status()
-
-        soup = BeautifulSoup(
-            response.text,
-            "html.parser"
-        )
-
-        for tag in soup(
-            [
-                "script",
-                "style",
-                "noscript",
-                "header",
-                "footer",
-                "nav"
-            ]
-        ):
-            tag.decompose()
-
-        text = soup.get_text(" ")
-
-        text = clean_text(text)
-
-        return text[:50000]
-
-    except Exception:
-        return ""
-
-
-def calculate_similarity(text1, text2):
-
-    if not text1 or not text2:
+    if not query_shingles:
         return 0.0
+
+    return (
+        len(
+            query_shingles
+            & reference_shingles
+        )
+        / len(query_shingles)
+        * 100.0
+    )
+
+
+def tfidf_similarity(
+    query_chunks,
+    reference_chunks,
+):
+
+    if (
+        not query_chunks
+        or not reference_chunks
+        or TfidfVectorizer is None
+        or sklearn_cosine is None
+    ):
+
+        return None
 
     try:
 
         vectorizer = TfidfVectorizer(
-            stop_words="english"
+            lowercase=True,
+            stop_words="english",
+            ngram_range=(1, 2),
+            max_features=40000,
         )
 
-        vectors = vectorizer.fit_transform(
-            [text1, text2]
+        matrix = vectorizer.fit_transform(
+            query_chunks
+            + reference_chunks
         )
 
-        score = cosine_similarity(
-            vectors[0:1],
-            vectors[1:2]
-        )[0][0]
+        q_matrix = matrix[
+            :len(query_chunks)
+        ]
 
-        return round(score * 100, 2)
+        r_matrix = matrix[
+            len(query_chunks):
+        ]
 
-    except Exception:
-        return 0.0
+        scores = sklearn_cosine(
+            q_matrix,
+            r_matrix,
+        )
+
+        return scores
+
+    except ValueError:
+
+        return None
 
 
-def check_plagiarism(
-    document_text,
-    similarity_threshold=20,
-    max_sources=10
+def compare_chunks(
+    query_chunks,
+    reference_chunks,
+    embedding_model="gemini-embedding-2",
 ):
 
-    if not document_text:
-        return []
+    """
+    Returns one best reference match for every query chunk.
 
-    api_key = get_serpapi_key()
+    Gemini embeddings are used when available.
+    TF-IDF is used as a local fallback.
+    """
 
-    if not api_key:
-        raise ValueError(
-            "SERPAPI_KEY not found."
+    semantic_matrix = None
+
+    method = "TF-IDF"
+
+    if embeddings_available():
+
+        try:
+
+            all_texts = (
+                query_chunks
+                + reference_chunks
+            )
+
+            vectors = embed_texts(
+                all_texts,
+                model=embedding_model,
+                output_dimensionality=768,
+            )
+
+            query_vectors = vectors[
+                :len(query_chunks)
+            ]
+
+            reference_vectors = vectors[
+                len(query_chunks):
+            ]
+
+            semantic_matrix = np.array(
+                [
+                    [
+                        cosine_similarity(
+                            q,
+                            r,
+                        )
+                        for r in reference_vectors
+                    ]
+                    for q in query_vectors
+                ]
+            )
+
+            method = (
+                "Gemini semantic embeddings"
+            )
+
+        except Exception:
+
+            semantic_matrix = None
+
+    if semantic_matrix is None:
+
+        tfidf = tfidf_similarity(
+            query_chunks,
+            reference_chunks,
         )
 
-    chunks = split_into_chunks(
-        document_text,
-        chunk_size=120,
-        overlap=30
-    )
+        if tfidf is None:
 
-    if not chunks:
-        return []
+            return [], "keyword fallback"
 
-    results = []
+        semantic_matrix = tfidf
 
-    seen_urls = set()
+        method = "TF-IDF"
 
-    chunks_to_search = chunks[:10]
+    matches = []
 
-    for chunk in chunks_to_search:
+    for query_index, query_chunk in enumerate(
+        query_chunks
+    ):
 
-        words = chunk.split()
+        row = semantic_matrix[
+            query_index
+        ]
 
-        query_text = " ".join(words[:20])
-
-        if not query_text:
+        if len(row) == 0:
             continue
 
-        query = f'"{query_text}"'
-
-        search_results = search_web(
-            query,
-            api_key,
-            num_results=5
+        reference_index = int(
+            np.argmax(row)
         )
 
-        for item in search_results:
+        score = float(
+            row[reference_index]
+            * 100.0
+        )
 
-            url = item.get("link", "")
+        reference_chunk = (
+            reference_chunks[
+                reference_index
+            ]
+        )
 
-            if not url:
-                continue
+        phrase_score = phrase_overlap(
+            query_chunk,
+            reference_chunk,
+        )
 
-            if url in seen_urls:
-                continue
+        matches.append(
+            {
+                "query": query_chunk,
+                "reference": reference_chunk,
+                "semantic_similarity": score,
+                "phrase_overlap": phrase_score,
+                "reference_index": reference_index,
+            }
+        )
 
-            seen_urls.add(url)
+    return matches, method
 
-            title = item.get(
-                "title",
-                ""
+
+def analyze_document(
+    main_text,
+    reference_files,
+    use_gemini_embeddings=True,
+    embedding_model="gemini-embedding-2",
+    max_matches=40,
+):
+
+    reference_documents = []
+
+    for file_obj in (
+        reference_files or []
+    ):
+
+        try:
+
+            text = extract_text_from_file(
+                file_obj
             )
 
-            snippet = item.get(
-                "snippet",
-                ""
-            )
+            if text.strip():
 
-            page_text = extract_page_text(
-                url
-            )
-
-            if not page_text:
-                continue
-
-            similarity = calculate_similarity(
-                chunk,
-                page_text
-            )
-
-            if similarity >= similarity_threshold:
-
-                results.append(
+                reference_documents.append(
                     {
-                        "similarity": similarity,
-                        "url": url,
-                        "title": title,
-                        "snippet": snippet
+                        "source": filename(
+                            file_obj
+                        ),
+                        "text": text,
                     }
                 )
 
-    results.sort(
-        key=lambda x: x["similarity"],
-        reverse=True
+        except Exception as exc:
+
+            reference_documents.append(
+                {
+                    "source": filename(
+                        file_obj
+                    ),
+                    "text": "",
+                    "error": str(exc),
+                }
+            )
+
+    query_chunks = chunks(
+        main_text
     )
 
-    return results[:max_sources]
+    all_matches = []
+
+    source_scores = []
+
+    total_reference_chunks = 0
+
+    for reference in reference_documents:
+
+        if not reference["text"]:
+            continue
+
+        reference_chunks = chunks(
+            reference["text"]
+        )
+
+        total_reference_chunks += len(
+            reference_chunks
+        )
+
+        if (
+            not query_chunks
+            or not reference_chunks
+        ):
+            continue
+
+        matches, method = compare_chunks(
+            query_chunks,
+            reference_chunks,
+            embedding_model=embedding_model,
+        )
+
+        if matches:
+
+            scores = sorted(
+                [
+                    m["semantic_similarity"]
+                    for m in matches
+                ],
+                reverse=True,
+            )
+
+            top_n = max(
+                1,
+                int(
+                    len(scores)
+                    * 0.25
+                ),
+            )
+
+            source_similarity = float(
+                np.mean(
+                    scores[:top_n]
+                )
+            )
+
+            source_scores.append(
+                {
+                    "source": reference[
+                        "source"
+                    ],
+                    "similarity": source_similarity,
+                    "method": method,
+                }
+            )
+
+            for match in matches:
+
+                if (
+                    match[
+                        "semantic_similarity"
+                    ] >= 50.0
+                    or
+                    match[
+                        "phrase_overlap"
+                    ] >= 2.0
+                ):
+
+                    all_matches.append(
+                        {
+                            "source": reference[
+                                "source"
+                            ],
+                            "semantic_similarity":
+                                match[
+                                    "semantic_similarity"
+                                ],
+                            "phrase_overlap":
+                                match[
+                                    "phrase_overlap"
+                                ],
+                            "query_excerpt":
+                                match[
+                                    "query"
+                                ][:1400],
+                            "reference_excerpt":
+                                match[
+                                    "reference"
+                                ][:1400],
+                        }
+                    )
+
+    source_scores.sort(
+        key=lambda item: item[
+            "similarity"
+        ],
+        reverse=True,
+    )
+
+    all_matches.sort(
+        key=lambda item: (
+            item["phrase_overlap"],
+            item["semantic_similarity"],
+        ),
+        reverse=True,
+    )
+
+    unique = []
+
+    seen = set()
+
+    for match in all_matches:
+
+        key = (
+            match["source"],
+            normalize(
+                match["query_excerpt"]
+            )[:250],
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        unique.append(
+            match
+        )
+
+    return {
+
+        "word_count":
+            word_count(
+                main_text
+            ),
+
+        "sentence_count":
+            sentence_count(
+                main_text
+            ),
+
+        "reference_count":
+            len(
+                reference_documents
+            ),
+
+        "reference_chunk_count":
+            total_reference_chunks,
+
+        "overall_similarity": (
+            source_scores[0][
+                "similarity"
+            ]
+            if source_scores
+            else None
+        ),
+
+        "source_scores":
+            source_scores,
+
+        "matches":
+            unique[:max_matches],
+    }
