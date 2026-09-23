@@ -1,30 +1,34 @@
-# 📄 Humanize RAG - AI Content Humanizer + Plagiarism Checker
-
-A Streamlit-based RAG application that can:
-
-- Upload PDF, DOCX and TXT files
-- Extract document text
-- Search web sources using SerpAPI
-- Generate semantic embeddings
-- Build a FAISS vector index
-- Compare uploaded content with web search results
-- Detect potentially similar web passages
-- Rewrite content using a local FLAN-T5 model
-- Download the rewritten content
-
+---
+title: HumanizeContent
+emoji: 📄
+colorFrom: blue
+colorTo: purple
+sdk: streamlit
+app_file: app.py
 ---
 
-# Features
+# HumanizeContent
 
-## 1. Document Upload
+A Streamlit document-analysis application with:
 
-Supported files:
+- PDF extraction
+- DOCX extraction
+- PPTX extraction
+- TXT / Markdown / CSV extraction
+- XLSX extraction
+- Local reference-corpus comparison
+- TF-IDF fallback similarity
+- Gemini semantic embeddings
+- Passage-level overlap review
+- Optional web source discovery
+- Gemini-based natural rewriting
+- Downloadable rewritten text
 
-- PDF
-- DOCX
-- TXT
+## 1. Streamlit Cloud
 
-The application uses your existing:
+This project is designed for Streamlit Community Cloud and does **not** require Docker.
+
+Create the app using:
 
 ```text
-extractors.py
+Main file: app.py
