@@ -1,269 +1,551 @@
+import os
 import streamlit as st
+from dotenv import load_dotenv
 
-from extractors import extract_text_from_file, supported_extensions
-from plagiarism import analyze_document
-from humanizer import humanize_document, gemini_status
-from web_search import search_web, format_search_results
+from extractors import (
+    extract_text_from_file,
+    supported_extensions
+)
 
+from plagiarism import (
+    CopyleaksClient,
+    CopyleaksError,
+    detect_ai_text,
+    parse_ai_result,
+    analyze_with_copyleaks
+)
+
+from humanizer import (
+    humanize_document,
+    gemini_status
+)
+
+from web_search import (
+    search_web,
+    format_search_results
+)
+
+
+load_dotenv()
+
+
+# ============================================================
+# PAGE CONFIG
+# ============================================================
 
 st.set_page_config(
-    page_title="HumanizeContent - Document Similarity & RAG",
-    page_icon="📄",
-    layout="wide",
+    page_title="AI & Plagiarism Checker",
+    page_icon="🔎",
+    layout="wide"
 )
 
 
-st.title("📄 HumanizeContent")
+# ============================================================
+# CUSTOM CSS
+# ============================================================
 
-st.caption(
-    "Document extraction • reference-corpus similarity • semantic RAG matching • "
-    "source discovery • natural rewriting"
+st.markdown(
+    """
+    <style>
+    .main-title {
+        font-size: 36px;
+        font-weight: 700;
+        margin-bottom: 5px;
+    }
+
+    .subtitle {
+        color: #666;
+        margin-bottom: 25px;
+    }
+
+    .result-box {
+        padding: 20px;
+        border-radius: 10px;
+        border: 1px solid #ddd;
+        margin-bottom: 15px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
 )
 
+
+# ============================================================
+# TITLE
+# ============================================================
+
+st.markdown(
+    '<div class="main-title">'
+    'AI & Plagiarism Checker'
+    '</div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="subtitle">'
+    'Check documents for plagiarism and AI-generated content.'
+    '</div>',
+    unsafe_allow_html=True
+)
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
 
 with st.sidebar:
-    st.header("Configuration")
 
-    generation_model = st.text_input(
-        "Gemini generation model",
-        value="gemini-3.8-flash",
-        help="Change this if your Gemini account exposes another generation model.",
+    st.header("Copyleaks")
+
+    copyleaks_email = os.getenv(
+        "COPYLEAKS_EMAIL",
+        ""
     )
 
-    embedding_model = st.text_input(
-        "Gemini embedding model",
-        value="gemini-embedding-2",
-        help="Current Gemini embedding model used for semantic similarity.",
+    copyleaks_key = os.getenv(
+        "COPYLEAKS_API_KEY",
+        ""
     )
 
-    st.session_state["generation_model"] = generation_model
-    st.session_state["embedding_model"] = embedding_model
+    sandbox_default = (
+        os.getenv(
+            "COPYLEAKS_SANDBOX",
+            "true"
+        ).lower()
+        in ("true", "1", "yes", "y")
+    )
 
-    status = gemini_status()
-
-    if status["configured"]:
-        st.success("Gemini API key detected.")
+    if copyleaks_email:
+        st.success("Copyleaks email configured")
     else:
-        st.warning("Gemini API key not configured.")
+        st.warning(
+            "COPYLEAKS_EMAIL is not configured."
+        )
 
-    st.markdown("### What this app can verify")
+    if copyleaks_key:
+        st.success("Copyleaks API key configured")
+    else:
+        st.warning(
+            "COPYLEAKS_API_KEY is not configured."
+        )
 
-    st.write(
-        "It compares your document with reference files you provide and can "
-        "retrieve web search results for source discovery."
+    sandbox = st.checkbox(
+        "Sandbox mode",
+        value=sandbox_default
     )
 
-    st.markdown("### Important")
-
-    st.info(
-        "This is not Turnitin. It cannot access Turnitin's proprietary database "
-        "or guarantee a Turnitin AI/plagiarism score."
+    st.caption(
+        "Sandbox mode is useful for testing. "
+        "Production scans may consume Copyleaks credits."
     )
 
-    st.markdown("### Supported")
 
-    st.write(", ".join(sorted(supported_extensions())))
+# ============================================================
+# FILE UPLOAD
+# ============================================================
 
+st.subheader("Upload Document")
+
+allowed_extensions = supported_extensions()
 
 main_file = st.file_uploader(
-    "1. Upload the document you want to analyze",
-    type=[x.lstrip(".") for x in supported_extensions()],
+    "Choose a file",
+    type=allowed_extensions
 )
 
 
-reference_files = st.file_uploader(
-    "2. Upload reference/source documents",
-    type=[x.lstrip(".") for x in supported_extensions()],
-    accept_multiple_files=True,
-    help="These files form your local reference corpus.",
-)
+if not main_file:
+
+    st.info(
+        "Upload a PDF, DOCX, TXT, or another supported "
+        "document to start."
+    )
+
+    st.stop()
 
 
-web_query = st.text_input(
-    "Optional web source search",
-    placeholder="Enter a topic, sentence, or source to search",
-)
+# ============================================================
+# READ FILE
+# ============================================================
+
+file_bytes = main_file.getvalue()
+
+filename = main_file.name
 
 
-if main_file:
-    try:
-        main_text = extract_text_from_file(main_file)
-        st.session_state["main_text"] = main_text
+# ============================================================
+# EXTRACT TEXT
+# ============================================================
 
-    except Exception as exc:
-        st.error(f"Could not extract text: {exc}")
-        main_text = ""
+try:
 
-else:
-    main_text = st.session_state.get("main_text", "")
+    extracted_text = extract_text_from_file(
+        main_file
+    )
+
+except Exception as exc:
+
+    st.error(
+        f"Could not extract text from the document: {exc}"
+    )
+
+    st.stop()
 
 
-tab_analysis, tab_rewrite, tab_search, tab_text = st.tabs(
-    [
-        "🔎 Similarity",
-        "✍️ Rewrite",
-        "🌐 Source Search",
-        "📚 Extracted Text",
-    ]
+if not extracted_text:
+
+    st.warning(
+        "No text could be extracted from this file."
+    )
+
+    st.stop()
+
+
+# ============================================================
+# BASIC INFORMATION
+# ============================================================
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.metric(
+        "File",
+        filename
+    )
+
+with col2:
+    st.metric(
+        "Characters",
+        len(extracted_text)
+    )
+
+with col3:
+    st.metric(
+        "Words",
+        len(extracted_text.split())
+    )
+
+
+# ============================================================
+# TABS
+# ============================================================
+
+tab_local, tab_copyleaks, tab_rewrite, tab_search, tab_text = (
+    st.tabs(
+        [
+            "Local Similarity",
+            "Copyleaks",
+            "Rewrite",
+            "Source Search",
+            "Extracted Text"
+        ]
+    )
 )
 
 
 # ============================================================
-# SIMILARITY
+# LOCAL SIMILARITY
 # ============================================================
 
-with tab_analysis:
+with tab_local:
 
-    st.subheader("Similarity / plagiarism signals")
+    st.subheader("Local Similarity")
+
+    reference_files = st.file_uploader(
+        "Upload reference files",
+        accept_multiple_files=True,
+        key="reference_files"
+    )
 
     if st.button(
-        "Analyze document",
-        type="primary",
-        use_container_width=True,
+        "Run Local Similarity",
+        key="local_similarity_button"
     ):
 
-        if not main_file:
-            st.error("Upload the main document first.")
+        if not reference_files:
 
-        elif not main_text.strip():
-            st.error("The document contains no readable text.")
+            st.warning(
+                "Please upload at least one reference file."
+            )
 
         else:
 
-            with st.spinner(
-                "Building comparison index and analyzing passages..."
+            st.info(
+                "Local similarity analysis can be connected "
+                "to your existing plagiarism.py implementation."
+            )
+
+
+# ============================================================
+# COPYLEAKS
+# ============================================================
+
+with tab_copyleaks:
+
+    st.subheader(
+        "Copyleaks Plagiarism + AI Detection"
+    )
+
+    st.write(
+        "Copyleaks requires your account email and API key."
+    )
+
+    st.code(
+        "COPYLEAKS_EMAIL=your-email@example.com\n"
+        "COPYLEAKS_API_KEY=your-api-key",
+        language="text"
+    )
+
+    if not copyleaks_email or not copyleaks_key:
+
+        st.error(
+            "Copyleaks credentials are not configured."
+        )
+
+        st.info(
+            "Add COPYLEAKS_EMAIL and COPYLEAKS_API_KEY "
+            "to your .env file."
+        )
+
+    else:
+
+        if st.button(
+            "Check Copyleaks",
+            key="copyleaks_check"
+        ):
+
+            try:
+
+                client = CopyleaksClient(
+                    email=copyleaks_email,
+                    api_key=copyleaks_key,
+                    sandbox=sandbox
+                )
+
+                with st.spinner(
+                    "Authenticating with Copyleaks..."
+                ):
+
+                    client.login()
+
+                st.success(
+                    "Copyleaks authentication successful."
+                )
+
+            except CopyleaksError as exc:
+
+                st.error(
+                    str(exc)
+                )
+
+        st.divider()
+
+        # ----------------------------------------------------
+        # DIRECT AI TEXT DETECTION
+        # ----------------------------------------------------
+
+        st.subheader(
+            "AI-Generated Content Detection"
+        )
+
+        if len(extracted_text) < 255:
+
+            st.warning(
+                f"Copyleaks AI text detection requires at "
+                f"least 255 characters. "
+                f"Your document has {len(extracted_text)}."
+            )
+
+        else:
+
+            if st.button(
+                "Check AI Content",
+                key="ai_detection_button"
             ):
 
                 try:
 
-                    report = analyze_document(
-                        main_text=main_text,
-                        reference_files=reference_files,
-                        use_gemini_embeddings=True,
-                        embedding_model=st.session_state[
-                            "embedding_model"
-                        ],
+                    with st.spinner(
+                        "Checking AI-generated content..."
+                    ):
+
+                        ai_result = detect_ai_text(
+                            text=extracted_text,
+                            email=copyleaks_email,
+                            api_key=copyleaks_key,
+                            sandbox=sandbox,
+                            explain=True
+                        )
+
+                    parsed_ai = parse_ai_result(
+                        ai_result
                     )
 
-                    st.session_state["report"] = report
+                    ai_percentage = (
+                        parsed_ai["ai_probability"]
+                    )
+
+                    human_percentage = (
+                        parsed_ai["human_probability"]
+                    )
+
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+
+                        if ai_percentage is not None:
+
+                            st.metric(
+                                "AI Probability",
+                                f"{ai_percentage:.1f}%"
+                            )
+
+                        else:
+
+                            st.metric(
+                                "AI Probability",
+                                "N/A"
+                            )
+
+                    with col2:
+
+                        if human_percentage is not None:
+
+                            st.metric(
+                                "Human Probability",
+                                f"{human_percentage:.1f}%"
+                            )
+
+                        else:
+
+                            st.metric(
+                                "Human Probability",
+                                "N/A"
+                            )
+
+                    with st.expander(
+                        "View Copyleaks AI Response"
+                    ):
+
+                        st.json(
+                            ai_result
+                        )
+
+                except CopyleaksError as exc:
+
+                    st.error(
+                        str(exc)
+                    )
 
                 except Exception as exc:
-                    st.exception(exc)
 
-    report = st.session_state.get("report")
+                    st.error(
+                        f"Unexpected error: {exc}"
+                    )
 
-    if report:
+        st.divider()
 
-        c1, c2, c3, c4 = st.columns(4)
+        # ----------------------------------------------------
+        # FULL DOCUMENT SCAN
+        # ----------------------------------------------------
 
-        c1.metric(
-            "Words",
-            f"{report['word_count']:,}",
+        st.subheader(
+            "Full Document Scan"
         )
 
-        c2.metric(
-            "Sentences",
-            f"{report['sentence_count']:,}",
+        st.write(
+            "This submits the original file to Copyleaks "
+            "for plagiarism and AI detection."
         )
 
-        c3.metric(
-            "Reference files",
-            f"{report['reference_count']:,}",
+        st.warning(
+            "Production document scans are asynchronous "
+            "and require a publicly reachable webhook."
         )
 
-        c4.metric(
-            "Reference chunks",
-            f"{report['reference_chunk_count']:,}",
+        webhook_url = st.text_input(
+            "Webhook base URL",
+            value=os.getenv(
+                "COPYLEAKS_WEBHOOK_URL",
+                ""
+            ),
+            placeholder="https://your-domain.com"
         )
 
-        st.markdown("### Overall local similarity")
+        if st.button(
+            "Submit Full Copyleaks Scan",
+            key="full_copyleaks_scan"
+        ):
 
-        if report["overall_similarity"] is None:
+            if not sandbox and not webhook_url:
 
-            st.info(
-                "No reference documents were supplied. A "
-                "plagiarism/similarity percentage cannot be calculated "
-                "without a comparison corpus."
-            )
-
-        else:
-
-            st.metric(
-                "Highest-source similarity",
-                f"{report['overall_similarity']:.1f}%",
-            )
-
-        st.markdown("### Source-by-source similarity")
-
-        if report["source_scores"]:
-
-            for row in report["source_scores"]:
-
-                st.write(
-                    f"**{row['source']}** — "
-                    f"{row['similarity']:.1f}% "
-                    f"({row['method']})"
+                st.error(
+                    "A public HTTPS webhook URL is required "
+                    "for production Copyleaks document scans."
                 )
 
-        else:
+            else:
 
-            st.info(
-                "No readable reference source was supplied."
-            )
+                try:
 
-        st.markdown("### Potential overlapping passages")
+                    with st.spinner(
+                        "Submitting document to Copyleaks..."
+                    ):
 
-        if report["matches"]:
+                        result = analyze_with_copyleaks(
+                            file_bytes=file_bytes,
+                            filename=filename,
+                            webhook_url=webhook_url
+                            if webhook_url
+                            else "https://example.com",
+                            sandbox=sandbox
+                        )
 
-            for i, match in enumerate(
-                report["matches"],
-                1,
-            ):
-
-                title = (
-                    f"Match {i} · {match['source']} · "
-                    f"semantic "
-                    f"{match['semantic_similarity']:.1f}% · "
-                    f"phrase "
-                    f"{match['phrase_overlap']:.1f}%"
-                )
-
-                with st.expander(title):
-
-                    st.markdown(
-                        "**Your document:**"
+                    st.success(
+                        "Document submitted successfully."
                     )
 
                     st.write(
-                        match["query_excerpt"]
+                        "Scan ID:"
                     )
 
-                    st.markdown(
-                        "**Reference source:**"
+                    st.code(
+                        result["scan_id"]
                     )
 
-                    st.write(
-                        match["reference_excerpt"]
+                    if result.get(
+                        "plagiarism_score"
+                    ) is not None:
+
+                        st.metric(
+                            "Plagiarism Score",
+                            f"{result['plagiarism_score']:.2f}%"
+                        )
+
+                    st.info(
+                        "Final production results are delivered "
+                        "through the Copyleaks completion webhook."
                     )
 
-                    st.caption(
-                        "This is a similarity signal requiring human review. "
-                        "Similarity alone does not establish plagiarism."
+                    with st.expander(
+                        "View submission response"
+                    ):
+
+                        st.json(
+                            result["response"]
+                        )
+
+                except CopyleaksError as exc:
+
+                    st.error(
+                        str(exc)
                     )
 
-        else:
+                except Exception as exc:
 
-            st.success(
-                "No significant overlap was detected against the supplied "
-                "reference corpus."
-            )
-
-        st.markdown("### AI detector")
-
-        st.info(
-            "No Turnitin AI score is shown. Turnitin's proprietary AI detector "
-            "is not available through this application."
-        )
+                    st.error(
+                        f"Unexpected error: {exc}"
+                    )
 
 
 # ============================================================
@@ -272,178 +554,82 @@ with tab_analysis:
 
 with tab_rewrite:
 
-    st.subheader(
-        "Rewrite for natural, clear expression"
-    )
-
-    st.write(
-        "The rewrite keeps the original meaning and asks the model not to "
-        "invent facts, citations, quotations, or statistics."
-    )
-
-    rewrite_text = st.text_area(
-        "Text",
-        value=st.session_state.get(
-            "humanized_text",
-            main_text,
-        ),
-        height=350,
-    )
-
-    style = st.selectbox(
-        "Style",
-        [
-            "Academic and formal",
-            "Natural professional",
-            "Clear and concise",
-            "Plain English",
-        ],
-    )
-
-    preserve = st.checkbox(
-        "Preserve citations, references, names, dates, numbers and technical terms",
-        value=True,
-    )
+    st.subheader("Rewrite / Humanize")
 
     if st.button(
-        "Rewrite",
-        type="primary",
-        use_container_width=True,
+        "Rewrite Document",
+        key="rewrite_document"
     ):
 
-        if not rewrite_text.strip():
-
-            st.error(
-                "Enter or upload text first."
-            )
-
-        else:
+        try:
 
             with st.spinner(
-                "Rewriting document sections..."
+                "Rewriting document..."
             ):
 
-                try:
+                rewritten = humanize_document(
+                    extracted_text
+                )
 
-                    result = humanize_document(
-                        text=rewrite_text,
-                        style=style,
-                        preserve_citations=preserve,
-                        model=st.session_state[
-                            "generation_model"
-                        ],
-                    )
-
-                    st.session_state[
-                        "humanized_text"
-                    ] = result["text"]
-
-                    st.session_state[
-                        "rewrite_notes"
-                    ] = result["notes"]
-
-                except Exception as exc:
-                    st.exception(exc)
-
-    if st.session_state.get(
-        "humanized_text"
-    ):
-
-        st.markdown(
-            "### Rewritten text"
-        )
-
-        st.text_area(
-            "Result",
-            value=st.session_state[
-                "humanized_text"
-            ],
-            height=550,
-        )
-
-        st.download_button(
-            "Download rewritten TXT",
-            data=st.session_state[
-                "humanized_text"
-            ],
-            file_name="rewritten_document.txt",
-            mime="text/plain",
-            use_container_width=True,
-        )
-
-        if st.session_state.get(
-            "rewrite_notes"
-        ):
-
-            st.markdown(
-                "### Processing notes"
+            st.text_area(
+                "Rewritten Content",
+                rewritten,
+                height=500
             )
 
-            st.write(
-                st.session_state[
-                    "rewrite_notes"
-                ]
+        except Exception as exc:
+
+            st.error(
+                f"Rewrite failed: {exc}"
             )
 
 
 # ============================================================
-# WEB SEARCH
+# SOURCE SEARCH
 # ============================================================
 
 with tab_search:
 
     st.subheader(
-        "Web source discovery"
+        "Search Web Sources"
     )
 
-    st.caption(
-        "Search is for finding sources to review. It is not a substitute "
-        "for Turnitin's proprietary corpus."
+    search_query = st.text_input(
+        "Search query",
+        value=""
     )
 
     if st.button(
-        "Search web",
-        use_container_width=True,
+        "Search Sources",
+        key="search_sources"
     ):
 
-        if not web_query.strip():
+        if not search_query.strip():
 
-            st.error(
+            st.warning(
                 "Enter a search query."
             )
 
         else:
 
-            with st.spinner(
-                "Searching..."
-            ):
+            try:
 
-                try:
+                results = search_web(
+                    search_query
+                )
 
-                    results = search_web(
-                        web_query,
-                        max_results=8,
-                    )
+                st.markdown(
+                    format_search_results(
+                        results
+                    ),
+                    unsafe_allow_html=True
+                )
 
-                    st.session_state[
-                        "web_results"
-                    ] = results
+            except Exception as exc:
 
-                except Exception as exc:
-                    st.exception(exc)
-
-    results = st.session_state.get(
-        "web_results",
-        [],
-    )
-
-    if results:
-
-        st.markdown(
-            format_search_results(
-                results
-            )
-        )
+                st.error(
+                    f"Search failed: {exc}"
+                )
 
 
 # ============================================================
@@ -452,16 +638,12 @@ with tab_search:
 
 with tab_text:
 
-    if main_text:
+    st.subheader(
+        "Extracted Text"
+    )
 
-        st.text_area(
-            "Extracted text",
-            value=main_text,
-            height=650,
-        )
-
-    else:
-
-        st.info(
-            "Upload a document to see extracted text."
-        )
+    st.text_area(
+        "Document Text",
+        extracted_text,
+        height=600
+    )
