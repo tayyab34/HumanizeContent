@@ -369,13 +369,12 @@ with tab_copyleaks:
                         "Checking AI-generated content..."
                     ):
 
-                        ai_result = detect_ai_text(
-                            text=extracted_text,
-                            email=copyleaks_email,
-                            api_key=copyleaks_key,
-                            sandbox=sandbox,
-                            explain=True
-                        )
+                       ai_result = detect_ai_text(
+    text=extracted_text,
+    email=copyleaks_email,
+    api_key=copyleaks_key,
+    sandbox=sandbox
+)
 
                     parsed_ai = parse_ai_result(
                         ai_result
