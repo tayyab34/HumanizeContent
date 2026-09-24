@@ -85,7 +85,8 @@ def detect_ai_text(
     text,
     email=None,
     api_key=None,
-    sandbox=True
+    sandbox=True,
+    explain=False
 ):
 
     if not text or not text.strip():
@@ -118,9 +119,10 @@ def detect_ai_text(
             "Content-Type": "application/json"
         },
         json={
-            "text": text,
-            "sandbox": sandbox
-        },
+    "text": text,
+    "sandbox": sandbox,
+    "explain": explain
+},
         timeout=60
     )
 
