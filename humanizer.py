@@ -31,7 +31,7 @@ def humanize_document(text):
     genai.configure(api_key=api_key)
 
     model = genai.GenerativeModel(
-        "gemini-2.0-flash"
+        "gemini-3.6-flash"
     )
 
     prompt = f"""
